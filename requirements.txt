@@ -4,3 +4,5 @@ numpy<2.3
 pandas-ta
 alpaca-py
 scikit-learn
+matplotlib
+
