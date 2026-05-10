@@ -13,4 +13,5 @@ pandas\
 pandas-ta\
 Scikit-learn\
 numpy>=2.1,<2.3\
+pydantic>=2.0\
 }
