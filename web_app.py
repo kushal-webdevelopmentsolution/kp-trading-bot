@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from alpaca.data.historical import StockHistoricalDataClient, NewsClient
 from alpaca.data.requests import StockBarsRequest, NewsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed # Added for IEX fix
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
@@ -37,11 +38,19 @@ if "logs" not in st.session_state:
 
 # --- MULTI-THREADED SCANNER FUNCTIONS ---
 def scan_ticker(symbol, run_bot_active, order_mode, order_val):
-    """Worker function optimized for Cloud resource limits."""
+    """Worker function optimized for Cloud resource limits and IEX feed."""
     try:
-        # 1. Strategy Optimization (Lightweight)
-        req_opt = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
-                                   start=datetime.now()-timedelta(days=365), end=datetime.now())
+        # Buffer to avoid SIP restriction (15-minute delay)
+        end_time = datetime.now() - timedelta(minutes=15)
+
+        # 1. Strategy Optimization (Lightweight) - Explicitly use IEX feed
+        req_opt = StockBarsRequest(
+            symbol_or_symbols=symbol, 
+            timeframe=TimeFrame.Day,
+            start=datetime.now()-timedelta(days=365), 
+            end=end_time,
+            feed=DataFeed.IEX 
+        )
         df_opt = data_client.get_stock_bars(req_opt).df.reset_index()
         best_rsi = 14
         max_strength = 0
@@ -52,9 +61,14 @@ def scan_ticker(symbol, run_bot_active, order_mode, order_val):
                 if strength > max_strength:
                     max_strength, best_rsi = strength, r
 
-        # 2. Fetch Data & AI Prediction
-        req_data = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
-                                    start=datetime.now()-timedelta(days=1000), end=datetime.now())
+        # 2. Fetch Data & AI Prediction - Explicitly use IEX feed
+        req_data = StockBarsRequest(
+            symbol_or_symbols=symbol, 
+            timeframe=TimeFrame.Day,
+            start=datetime.now()-timedelta(days=1000), 
+            end=end_time,
+            feed=DataFeed.IEX
+        )
         df = data_client.get_stock_bars(req_data).df.reset_index()
         df.ta.rsi(length=best_rsi, append=True)
         df.ta.bbands(length=20, append=True)
@@ -65,7 +79,6 @@ def scan_ticker(symbol, run_bot_active, order_mode, order_val):
 
         cols = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'BBL', 'BBU', 'MFI', 'RVOL'])]
 
-        # Voting Ensemble
         clf1 = RandomForestClassifier(n_estimators=100, random_state=42)
         clf2 = GradientBoostingClassifier(n_estimators=100, random_state=42)
         model = VotingClassifier(estimators=[('rf', clf1), ('gb', clf2)], voting='soft')
@@ -123,7 +136,7 @@ if st.sidebar.button("🔴 MANUAL SELL ALL"):
 clock = trading_client.get_clock()
 status_color = "#00ff00" if clock.is_open else "#ff0000"
 st.title("🚀 AI Multi-Threaded Command Center")
-st.markdown(f"<div style='border-left: 5px solid {status_color}; padding-left:10px;'><b>Market Status:</b> {'OPEN' if clock.is_open else 'CLOSED'}</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='border-left: 5px solid {status_color}; padding-left:10px;'><b>Market Status:</b> {'OPEN' if clock.is_open else 'CLOSED'} (15min Delayed Feed)</div>", unsafe_allow_html=True)
 
 @st.fragment(run_every=30)
 def trading_dashboard():
@@ -131,15 +144,14 @@ def trading_dashboard():
     with col1:
         try:
             acc = trading_client.get_account()
-            m_col1, m_col2 = st.columns(2)
-            m_col1.metric("PORTFOLIO VALUE", f"${float(acc.equity):,.2f}")
-            m_col2.metric("DAILY PnL", f"${float(acc.equity)-float(acc.last_equity):.2f}")
+            m1, m2 = st.columns(2)
+            m1.metric("PORTFOLIO VALUE", f"${float(acc.equity):,.2f}")
+            m2.metric("DAILY PnL", f"${float(acc.equity)-float(acc.last_equity):.2f}")
 
             st.subheader("⚡ Signal Feed & AI Confidence")
             h1, h2, h3, h4 = st.columns([1, 1, 2, 1])
             h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONFIDENCE GAUGE"); h4.caption("ACTION")
 
-            # Limit workers to 3 to prevent Cloud CPU throttling
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 futures = [executor.submit(scan_ticker, s, run_bot, order_mode, order_val) for s in st.session_state.tickers]
                 results = [f.result() for f in concurrent.futures.as_completed(futures)]
