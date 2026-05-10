@@ -23,7 +23,7 @@ trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 st.set_page_config(page_title="AI Multi-Threaded Trader", layout="wide")
 
 # Default ticker list
-DEFAULT_TICKERS = ["SPY", "QQQ", "NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOGL", "META", "AMZN"]
+DEFAULT_TICKERS = ["SPY", "AMZN"]
 
 # Initialize Session States
 if "tickers" not in st.session_state:
