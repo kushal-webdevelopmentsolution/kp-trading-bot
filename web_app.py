@@ -14,10 +14,10 @@ from sklearn.linear_model import LogisticRegression
 
 # --- CONFIGURATION ---
 try:
-    API_KEY = "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
-    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
+    API_KEY = st.secrets["API_KEY"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
 except KeyError:
-    st.error("API Keys missing! Add them to Streamlit Secrets.")
+    st.error("API Keys missing! Add them to Streamlit Secrets dashboard.")
     st.stop()
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
@@ -34,12 +34,12 @@ if "tickers" not in st.session_state:
     st.session_state.tickers = DEFAULT_TICKERS
 if "logs" not in st.session_state:
     st.session_state.logs = []
-if "trade_history" not in st.session_state:
-    st.session_state.trade_history = []
 
 # --- MULTI-THREADED SCANNER FUNCTIONS ---
 def scan_ticker(symbol, run_bot_active, order_mode, order_val):
+    """Worker function optimized for Cloud resource limits."""
     try:
+        # 1. Strategy Optimization (Lightweight)
         req_opt = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
                                    start=datetime.now()-timedelta(days=365), end=datetime.now())
         df_opt = data_client.get_stock_bars(req_opt).df.reset_index()
@@ -47,12 +47,14 @@ def scan_ticker(symbol, run_bot_active, order_mode, order_val):
         max_strength = 0
         for r in [10, 14, 20]:
             rsi = ta.rsi(df_opt['close'], length=r)
-            strength = rsi.diff().abs().mean()
-            if strength > max_strength:
-                max_strength, best_rsi = strength, r
+            if rsi is not None:
+                strength = rsi.diff().abs().mean()
+                if strength > max_strength:
+                    max_strength, best_rsi = strength, r
 
+        # 2. Fetch Data & AI Prediction
         req_data = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
-                                    start=datetime.now()-timedelta(days=1200), end=datetime.now())
+                                    start=datetime.now()-timedelta(days=1000), end=datetime.now())
         df = data_client.get_stock_bars(req_data).df.reset_index()
         df.ta.rsi(length=best_rsi, append=True)
         df.ta.bbands(length=20, append=True)
@@ -62,11 +64,12 @@ def scan_ticker(symbol, run_bot_active, order_mode, order_val):
         df = df.dropna()
 
         cols = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'BBL', 'BBU', 'MFI', 'RVOL'])]
-        model = VotingClassifier(estimators=[
-            ('rf', RandomForestClassifier(n_estimators=100)),
-            ('gb', GradientBoostingClassifier()),
-            ('lr', LogisticRegression(max_iter=1000))
-        ], voting='soft').fit(df[cols][:-1], df['target'][:-1])
+
+        # Voting Ensemble
+        clf1 = RandomForestClassifier(n_estimators=100, random_state=42)
+        clf2 = GradientBoostingClassifier(n_estimators=100, random_state=42)
+        model = VotingClassifier(estimators=[('rf', clf1), ('gb', clf2)], voting='soft')
+        model.fit(df[cols][:-1], df['target'][:-1])
 
         prob_array = model.predict_proba(df[cols].tail(1))
         up_prob = float(prob_array[0][1])
@@ -74,14 +77,13 @@ def scan_ticker(symbol, run_bot_active, order_mode, order_val):
         qty = float(order_val if order_mode == "Shares" else round(order_val / price, 2))
 
         if run_bot_active and up_prob >= 0.90:
-            tp, sl = round(price * 1.04, 2), round(price * 0.98, 2)
             trading_client.submit_order(MarketOrderRequest(
                 symbol=symbol, qty=qty, side=OrderSide.BUY,
                 time_in_force=TimeInForce.GTC, order_class=OrderClass.BRACKET,
-                take_profit=TakeProfitRequest(limit_price=tp),
-                stop_loss=StopLossRequest(stop_price=sl)
+                take_profit=TakeProfitRequest(limit_price=round(price*1.04, 2)),
+                stop_loss=StopLossRequest(stop_price=round(price*0.98, 2))
             ))
-            st.session_state.logs.append(f"🤖 AUTO BUY: {symbol} | Qty: {qty} (AI Conf: {up_prob*100:.1f}%)")
+            st.session_state.logs.append(f"🤖 AUTO BUY: {symbol} @ {price:.2f}")
 
         return {"symbol": symbol, "price": price, "prob": up_prob, "rsi": best_rsi, "df": df, "qty": qty}
     except Exception as e:
@@ -100,19 +102,15 @@ order_val = st.sidebar.number_input("Value", min_value=0.01, value=1.0 if order_
 
 st.sidebar.markdown("---")
 st.sidebar.header("📂 Watchlist Manager")
-
-# ADD TICKER
 new_ticker = st.sidebar.text_input("Add Ticker", key="ticker_input").upper().strip()
 if st.sidebar.button("➕ Add"):
     if new_ticker and new_ticker not in st.session_state.tickers:
         st.session_state.tickers.append(new_ticker)
         st.rerun()
 
-# REMOVE TICKER (Multi-select synced with state)
-updated_list = st.sidebar.multiselect("Current Wishlist (Remove items below)", 
+updated_list = st.sidebar.multiselect("Current Wishlist", 
                                      options=st.session_state.tickers, 
                                      default=st.session_state.tickers)
-
 if updated_list != st.session_state.tickers:
     st.session_state.tickers = updated_list
     st.rerun()
@@ -125,7 +123,7 @@ if st.sidebar.button("🔴 MANUAL SELL ALL"):
 clock = trading_client.get_clock()
 status_color = "#00ff00" if clock.is_open else "#ff0000"
 st.title("🚀 AI Multi-Threaded Command Center")
-st.markdown(f"<div style='border-left: 5px solid {status_color}; padding-left:10px;'><b>Status:</b> {'OPEN' if clock.is_open else 'CLOSED'}</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='border-left: 5px solid {status_color}; padding-left:10px;'><b>Market Status:</b> {'OPEN' if clock.is_open else 'CLOSED'}</div>", unsafe_allow_html=True)
 
 @st.fragment(run_every=30)
 def trading_dashboard():
@@ -133,42 +131,52 @@ def trading_dashboard():
     with col1:
         try:
             acc = trading_client.get_account()
-            st.columns(2)[0].metric("PORTFOLIO VALUE", f"${float(acc.equity):,.2f}")
-            st.columns(2)[1].metric("DAILY PnL", f"${float(acc.equity)-float(acc.last_equity):.2f}")
+            m_col1, m_col2 = st.columns(2)
+            m_col1.metric("PORTFOLIO VALUE", f"${float(acc.equity):,.2f}")
+            m_col2.metric("DAILY PnL", f"${float(acc.equity)-float(acc.last_equity):.2f}")
 
-            st.subheader("⚡ Signal Feed")
+            st.subheader("⚡ Signal Feed & AI Confidence")
             h1, h2, h3, h4 = st.columns([1, 1, 2, 1])
-            h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONFIDENCE"); h4.caption("ACTION")
+            h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONFIDENCE GAUGE"); h4.caption("ACTION")
 
-            with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Limit workers to 3 to prevent Cloud CPU throttling
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 futures = [executor.submit(scan_ticker, s, run_bot, order_mode, order_val) for s in st.session_state.tickers]
                 results = [f.result() for f in concurrent.futures.as_completed(futures)]
 
             best_ticker = None
             max_conf = 0
             for res in results:
-                if "error" in res: continue
+                if "error" in res:
+                    st.error(f"Error {res['symbol']}: {res['error']}")
+                    continue
+
                 s, price, prob, qty = res['symbol'], res['price'], res['prob'], res['qty']
-                if prob > max_conf: max_conf, best_ticker = prob, (s, res['df'])
+                if prob > max_conf: 
+                    max_conf, best_ticker = prob, (s, res['df'])
 
                 r1, r2, r3, r4 = st.columns([1, 1, 2, 1])
                 r1.write(f"**{s}**")
                 r2.write(f"${price:.2f}")
                 r3.progress(min(max(prob, 0.0), 1.0), text=f"{prob*100:.1f}%")
                 if r4.button(f"Buy {qty}", key=f"buy_{s}"):
-                    trading_client.submit_order(MarketOrderRequest(symbol=s, qty=qty, side=OrderSide.BUY, 
-                                               time_in_force=TimeInForce.GTC, order_class=OrderClass.BRACKET, 
-                                               take_profit=TakeProfitRequest(limit_price=round(price*1.04,2)), 
-                                               stop_loss=StopLossRequest(stop_price=round(price*0.98,2))))
-                    st.session_state.logs.append(f"👤 MAN BUY: {s}")
+                    trading_client.submit_order(MarketOrderRequest(
+                        symbol=s, qty=qty, side=OrderSide.BUY, 
+                        time_in_force=TimeInForce.GTC, order_class=OrderClass.BRACKET, 
+                        take_profit=TakeProfitRequest(limit_price=round(price*1.04,2)), 
+                        stop_loss=StopLossRequest(stop_price=round(price*0.98,2))))
+                    st.session_state.logs.append(f"👤 MAN BUY: {s} @ {price:.2f}")
 
             if best_ticker:
+                st.markdown("---")
                 st.subheader(f"📊 Analysis: {best_ticker[0]}")
                 st.line_chart(best_ticker[1][['close']].tail(50))
         except Exception as e: st.error(f"UI Error: {e}")
 
     with col2:
         st.subheader("📜 Activity Log")
-        st.text_area("Log", value="\n".join(st.session_state.logs[-15:]), height=600, label_visibility="collapsed")
+        log_text = "\n".join(st.session_state.logs[-15:])
+        st.text_area("Log", value=log_text, height=600, label_visibility="collapsed")
+        st.caption(f"Refreshed: {datetime.now().strftime('%H:%M:%S')}")
 
 trading_dashboard()
