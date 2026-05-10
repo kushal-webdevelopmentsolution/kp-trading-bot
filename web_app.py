@@ -12,7 +12,7 @@ from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakePro
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 from sklearn.ensemble import RandomForestClassifier
 
-# --- CONFIGURATION ---
+# --- CLOUD CONFIG ---
 try:
     API_KEY = st.secrets["API_KEY"]
     SECRET_KEY = st.secrets["SECRET_KEY"]
@@ -28,45 +28,26 @@ st.set_page_config(page_title="AI Trader Cloud Pro", layout="wide")
 # --- PERSISTENCE ENGINE ---
 SETTINGS_FILE = "settings.json"
 
-def save_settings():
-    """Writes all current widget values to the JSON file."""
-    # We pull directly from the 'keys' assigned to the widgets
-    settings = {
-        "tickers": st.session_state.get("tickers", ["SPY", "AMZN"]),
-        "run_bot": st.session_state.get("bot_toggle", False),
-        "profit_goal": st.session_state.get("goal_input", 200.0),
-        "loss_limit": st.session_state.get("loss_input", 100.0),
-        "order_mode": st.session_state.get("mode_radio", "USD"),
-        "order_val": st.session_state.get("val_input", 100.0),
-        "logs": st.session_state.get("logs", [])[-50:]
-    }
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f)
-
 def load_settings():
+    defaults = {"tickers": ["SPY", "AMZN", "NVDA", "GOOGL"], "run_bot": False, 
+                "profit_goal": 200.0, "loss_limit": 100.0, "order_mode": "USD", "order_val": 100.0}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f:
-                return json.load(f)
-        except: return None
-    return None
+                return {**defaults, **json.load(f)}
+        except: return defaults
+    return defaults
 
-# INITIAL LOAD (Run only once per app start)
-if "init_done" not in st.session_state:
+def save_settings():
+    settings = {k: st.session_state[k] for k in ["tickers", "run_bot", "profit_goal", "loss_limit", "order_mode", "order_val"]}
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f)
+
+if "init_loaded" not in st.session_state:
     saved = load_settings()
-    if saved:
-        st.session_state.tickers = saved.get("tickers", ["SPY", "AMZN"])
-        st.session_state.logs = saved.get("logs", [])
-        # Pre-set widget values via session state keys
-        st.session_state.bot_toggle = saved.get("run_bot", False)
-        st.session_state.goal_input = saved.get("profit_goal", 200.0)
-        st.session_state.loss_input = saved.get("loss_limit", 100.0)
-        st.session_state.mode_radio = saved.get("order_mode", "USD")
-        st.session_state.val_input = saved.get("order_val", 100.0)
-    else:
-        st.session_state.tickers = ["SPY", "AMZN", "NVDA", "GOOGL"]
-        st.session_state.logs = []
-    st.session_state.init_done = True
+    for k, v in saved.items(): st.session_state[k] = v
+    st.session_state.init_loaded = True
+    st.session_state.logs = []
 
 # --- SIDEBAR ---
 st.sidebar.header("📂 Watchlist")
@@ -77,35 +58,26 @@ if st.sidebar.button("➕ Add"):
         save_settings()
         st.rerun()
 
-# Multiselect uses the session state list and saves on change
-st.session_state.tickers = st.sidebar.multiselect(
-    "Active Watchlist", 
-    options=st.session_state.tickers, 
-    default=st.session_state.tickers,
-    on_change=save_settings
-)
+st.session_state.tickers = st.sidebar.multiselect("Active Watchlist", options=st.session_state.tickers, default=st.session_state.tickers, on_change=save_settings)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🛡️ Bot Control")
-
-# CRITICAL: We use 'key' and remove 'value' to ensure Streamlit handles the sync
-st.sidebar.toggle("Activate AI Bot", key="bot_toggle", on_change=save_settings)
-st.sidebar.number_input("Profit Goal ($)", key="goal_input", on_change=save_settings)
-st.sidebar.number_input("Max Loss ($)", key="loss_input", on_change=save_settings)
+st.session_state.run_bot = st.sidebar.toggle("Activate AI Bot", value=st.session_state.run_bot, on_change=save_settings)
+st.session_state.profit_goal = st.sidebar.number_input("Profit Goal ($)", value=st.session_state.profit_goal, on_change=save_settings)
+st.session_state.loss_limit = st.sidebar.number_input("Max Loss ($)", value=st.session_state.loss_limit, on_change=save_settings)
 
 st.sidebar.markdown("---")
-st.sidebar.radio("Sizing:", ["Shares", "USD"], key="mode_radio", on_change=save_settings)
-st.sidebar.number_input("Value", key="val_input", on_change=save_settings)
+st.session_state.order_mode = st.sidebar.radio("Sizing:", ["Shares", "USD"], index=0 if st.session_state.order_mode == "Shares" else 1, on_change=save_settings)
+st.session_state.order_val = st.sidebar.number_input("Value", value=st.session_state.order_val, on_change=save_settings)
 
 if st.sidebar.button("🚨 EMERGENCY SELL ALL", type="primary", use_container_width=True):
     trading_client.close_all_positions(cancel_orders=True)
-    st.session_state.logs.append(f"🚨 EMERGENCY: Liquidation triggered at {datetime.now().strftime('%H:%M:%S')}")
-    save_settings()
     st.rerun()
 
-# --- AI WORKER ---
+# --- WORKER ---
 def scan_ticker(symbol, run_bot, mode, val):
     try:
+        # Buffer for delayed IEX feed
         end = datetime.now() - timedelta(minutes=20)
         req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=end-timedelta(days=730), end=end, feed=DataFeed.IEX)
         df = data_client.get_stock_bars(req).df.reset_index()
@@ -115,19 +87,15 @@ def scan_ticker(symbol, run_bot, mode, val):
         df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
         df = df.dropna()
         cols = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'BBL', 'BBU'])]
-        model = RandomForestClassifier(n_estimators=100, random_state=42).fit(df[cols][:-1], df['target'][:-1])
+        model = RandomForestClassifier(n_estimators=100).fit(df[cols][:-1], df['target'][:-1])
         prob = float(model.predict_proba(df[cols].tail(1))[0][1])
         price = float(df['close'].iloc[-1])
         qty = float(val if mode == "Shares" else round(val / price, 2))
 
         if run_bot and prob >= 0.90:
-            trading_client.submit_order(MarketOrderRequest(
-                symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC, order_class=OrderClass.BRACKET, 
-                take_profit=TakeProfitRequest(limit_price=round(price*1.04, 2)), 
-                stop_loss=StopLossRequest(stop_price=round(price*0.98, 2))
-            ))
-            st.session_state.logs.append(f"🤖 AUTO BUY: {symbol} @ {price:.2f} (AI: {prob*100:.0f}%)")
-            save_settings()
+            trading_client.submit_order(MarketOrderRequest(symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC, order_class=OrderClass.BRACKET, 
+                                       take_profit=TakeProfitRequest(limit_price=round(price*1.04, 2)), stop_loss=StopLossRequest(stop_price=round(price*0.98, 2))))
+            st.session_state.logs.append(f"🤖 AI BUY: {symbol} @ {price:.2f}")
         return {"symbol": symbol, "price": price, "prob": prob, "df": df, "qty": qty}
     except Exception as e: return {"symbol": symbol, "error": str(e)}
 
@@ -136,46 +104,54 @@ st.title("🚀 AI Multi-Threaded Cloud Terminal")
 
 @st.fragment(run_every=30)
 def trading_dashboard():
-    # Metrics
     try:
         acc = trading_client.get_account()
         pnl = float(acc.equity) - float(acc.last_equity)
-        st.columns(2)[0].metric("PORTFOLIO", f"${float(acc.equity):,.2f}")
-        st.columns(2)[1].metric("DAILY PnL", f"${pnl:.2f}", delta=f"{pnl:.2f}")
+        st.columns(2).metric("PORTFOLIO", f"${float(acc.equity):,.2f}")
+        st.columns(2).metric("DAILY PnL", f"${pnl:.2f}", delta=f"{pnl:.2f}")
+        run_bot_active = False if (pnl >= st.session_state.profit_goal or pnl <= -abs(st.session_state.loss_limit)) else st.session_state.run_bot
+    except: run_bot_active = False
 
-        # Stop bot if limits hit
-        bot_allowed = st.session_state.bot_toggle
-        if pnl >= st.session_state.goal_input or pnl <= -abs(st.session_state.loss_input):
-            bot_allowed = False
-    except: bot_allowed = False
-
+    # ALIGNED TABLE HEADERS
     st.subheader("⚡ Signal Feed")
     h1, h2, h3, h4 = st.columns([1, 1, 2, 1])
-    h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONFIDENCE"); h4.caption("ACTION")
+    h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONFIDENCE GAUGE"); h4.caption("ACTION")
 
     if st.session_state.tickers:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            results = [f.result() for f in concurrent.futures.as_completed([ex.submit(scan_ticker, s, bot_allowed, st.session_state.mode_radio, st.session_state.val_input) for s in st.session_state.tickers])]
+            results = [f.result() for f in concurrent.futures.as_completed([ex.submit(scan_ticker, s, run_bot_active, st.session_state.order_mode, st.session_state.order_val) for s in st.session_state.tickers])]
 
         best_ticker = None; max_conf = 0
         for res in results:
-            if "error" in res: continue
+            if "error" in res:
+                st.error(f"Error {res['symbol']}: {res['error']}")
+                continue
             if res['prob'] > max_conf: max_conf, best_ticker = res['prob'], (res['symbol'], res['df'])
 
+            # ALIGNED DATA ROWS
             r1, r2, r3, r4 = st.columns([1, 1, 2, 1])
             r1.write(f"**{res['symbol']}**")
             r2.write(f"${res['price']:.2f}")
-            r3.progress(res['prob'], text=f"{res['prob']*100:.0f}%")
+            r3.progress(res['prob'], text=f"{res['prob']*100:.1f}%")
             if r4.button(f"Buy {res['qty']}", key=f"b_{res['symbol']}"):
-                st.session_state.logs.append(f"👤 MAN BUY: {res['symbol']} @ {res['price']:.2f}")
-                save_settings()
+                st.session_state.logs.append(f"👤 Manual {res['symbol']} @ {res['price']}")
 
         st.markdown("---")
+        l, r = st.columns([1.5, 1])
         if best_ticker:
-            st.subheader(f"📈 Chart: {best_ticker[0]}")
-            st.line_chart(best_ticker[1][['close']].tail(50))
+            with l: st.subheader(f"📈 Chart: {best_ticker[0]}"); st.line_chart(best_ticker[1][['close']].tail(50))
+            with r:
+                st.subheader("🔗 Risk Matrix")
+                # Lightweight sequential correlation fetch for UI stability
+                data = {}
+                for s in st.session_state.tickers:
+                    try:
+                        rd = [r for r in results if r['symbol']==s][0]
+                        data[s] = rd['df'].set_index('timestamp')['close']
+                    except: continue
+                if len(data) > 1: st.dataframe(pd.concat(data.values(), axis=1, keys=data.keys(), join='inner').corr().style.background_gradient(cmap='RdYlGn_r', axis=None), use_container_width=True)
 
-    st.subheader("📜 Persistent Activity Log")
-    st.code("\n".join(st.session_state.logs[-15:]))
+    st.subheader("📜 Log")
+    st.code("\n".join(st.session_state.logs[-10:]))
 
 trading_dashboard()
