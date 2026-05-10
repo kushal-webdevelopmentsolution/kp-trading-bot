@@ -12,4 +12,5 @@ alpaca-py\
 pandas\
 pandas-ta\
 Scikit-learn\
+numpy>=2.1,<2.3\
 }
