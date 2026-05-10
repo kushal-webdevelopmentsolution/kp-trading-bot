@@ -25,48 +25,45 @@ trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 
 st.set_page_config(page_title="AI Trader Cloud Pro", layout="wide")
 
-# --- PERSISTENCE ENGINE ---
+# --- PERSISTENCE ENGINE (All Settings + Logs) ---
 SETTINGS_FILE = "settings.json"
 
 def load_settings():
-    """Reads settings from the server disk safely."""
+    defaults = {
+        "tickers": ["SPY", "AMZN", "NVDA", "GOOGL"], 
+        "run_bot": False, 
+        "profit_goal": 200.0, 
+        "loss_limit": 100.0, 
+        "order_mode": "USD", 
+        "order_val": 100.0,
+        "logs": []
+    }
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f:
-                return json.load(f)
-        except: return None
-    return None
+                return {**defaults, **json.load(f)}
+        except: return defaults
+    return defaults
 
 def save_settings():
-    """Saves current widget states to the shared JSON file."""
-    # We use .get to safely grab the state even if widgets aren't rendered yet
+    # Capture current session state and write to file
     settings = {
-        "tickers": st.session_state.get("tickers", ["SPY", "AMZN", "NVDA", "GOOGL"]),
-        "run_bot": st.session_state.get("bot_toggle", False),
-        "profit_goal": st.session_state.get("goal_input", 200.0),
-        "loss_limit": st.session_state.get("loss_input", 100.0),
-        "order_mode": st.session_state.get("mode_radio", "USD"),
-        "order_val": st.session_state.get("val_input", 100.0),
-        "logs": st.session_state.get("logs", [])[-50:]
+        "tickers": st.session_state.tickers,
+        "run_bot": st.session_state.run_bot,
+        "profit_goal": st.session_state.profit_goal,
+        "loss_limit": st.session_state.loss_limit,
+        "order_mode": st.session_state.order_mode,
+        "order_val": st.session_state.order_val,
+        "logs": st.session_state.logs[-50:] # Keep last 50 entries
     }
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f)
 
-# --- INITIAL BOOTSTRAP ---
+# Initialize Session State from JSON on first load
 if "init_loaded" not in st.session_state:
     saved = load_settings()
-    if saved:
-        # Load into Session State keys that match widget 'key' parameters
-        st.session_state.tickers = saved.get("tickers", ["SPY", "AMZN"])
-        st.session_state.bot_toggle = saved.get("run_bot", False)
-        st.session_state.goal_input = saved.get("profit_goal", 200.0)
-        st.session_state.loss_input = saved.get("loss_limit", 100.0)
-        st.session_state.mode_radio = saved.get("order_mode", "USD")
-        st.session_state.val_input = saved.get("order_val", 100.0)
-        st.session_state.logs = saved.get("logs", [])
-    else:
-        st.session_state.tickers = ["SPY", "AMZN", "NVDA", "GOOGL"]
-        st.session_state.logs = []
+    for k, v in saved.items():
+        st.session_state[k] = v
     st.session_state.init_loaded = True
 
 # --- SIDEBAR ---
@@ -78,27 +75,32 @@ if st.sidebar.button("➕ Add"):
         save_settings()
         st.rerun()
 
-# Using 'key' in sidebar widgets automates the link to session_state
-st.sidebar.multiselect("Active Watchlist", options=st.session_state.tickers, key="tickers", on_change=save_settings)
+# Removal logic via multiselect
+current_list = st.sidebar.multiselect("Active Watchlist", 
+                                     options=st.session_state.tickers, 
+                                     default=st.session_state.tickers)
+if current_list != st.session_state.tickers:
+    st.session_state.tickers = current_list
+    save_settings()
+    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.header("🛡️ Bot Control")
-st.sidebar.toggle("Activate AI Bot", key="bot_toggle", on_change=save_settings)
-st.sidebar.number_input("Profit Goal ($)", key="goal_input", on_change=save_settings)
-st.sidebar.number_input("Max Loss ($)", key="loss_input", on_change=save_settings)
+
+# All inputs trigger save_settings on change
+st.session_state.run_bot = st.sidebar.toggle("Activate AI Bot", value=st.session_state.run_bot, on_change=save_settings)
+st.session_state.profit_goal = st.sidebar.number_input("Profit Goal ($)", value=st.session_state.profit_goal, on_change=save_settings)
+st.session_state.loss_limit = st.sidebar.number_input("Max Loss ($)", value=st.session_state.loss_limit, on_change=save_settings)
 
 st.sidebar.markdown("---")
-st.sidebar.radio("Sizing:", ["Shares", "USD"], key="mode_radio", on_change=save_settings)
-st.sidebar.number_input("Value", key="val_input", on_change=save_settings)
+st.session_state.order_mode = st.sidebar.radio("Sizing:", ["Shares", "USD"], index=0 if st.session_state.order_mode == "Shares" else 1, on_change=save_settings)
+st.session_state.order_val = st.sidebar.number_input("Value", value=st.session_state.order_val, on_change=save_settings)
 
 if st.sidebar.button("🚨 EMERGENCY SELL ALL", type="primary", use_container_width=True):
-    try:
-        trading_client.close_all_positions(cancel_orders=True)
-        st.session_state.logs.append(f"🚨 EMERGENCY: Liquidation at {datetime.now().strftime('%H:%M:%S')}")
-        save_settings()
-        st.rerun()
-    except Exception as e:
-        st.sidebar.error(f"Error: {e}")
+    trading_client.close_all_positions(cancel_orders=True)
+    st.session_state.logs.append(f"🚨 EMERGENCY: Liquidation triggered at {datetime.now().strftime('%H:%M:%S')}")
+    save_settings()
+    st.rerun()
 
 # --- AI WORKER ---
 def scan_ticker(symbol, run_bot, mode, val):
@@ -112,7 +114,7 @@ def scan_ticker(symbol, run_bot, mode, val):
         df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
         df = df.dropna()
         cols = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'BBL', 'BBU'])]
-        model = RandomForestClassifier(n_estimators=100, random_state=42).fit(df[cols][:-1], df['target'][:-1])
+        model = RandomForestClassifier(n_estimators=100).fit(df[cols][:-1], df['target'][:-1])
         prob = float(model.predict_proba(df[cols].tail(1))[0][1])
         price = float(df['close'].iloc[-1])
         qty = float(val if mode == "Shares" else round(val / price, 2))
@@ -123,8 +125,8 @@ def scan_ticker(symbol, run_bot, mode, val):
                 take_profit=TakeProfitRequest(limit_price=round(price*1.04, 2)), 
                 stop_loss=StopLossRequest(stop_price=round(price*0.98, 2))
             ))
-            st.session_state.logs.append(f"🤖 AUTO BUY: {symbol} @ {price:.2f} (AI: {prob*100:.1f}%)")
-            save_settings()
+            st.session_state.logs.append(f"🤖 AUTO BUY: {symbol} @ {price:.2f} (AI: {prob*100:.0f}%)")
+            save_settings() # Save log entry instantly
         return {"symbol": symbol, "price": price, "prob": prob, "df": df, "qty": qty}
     except Exception as e: return {"symbol": symbol, "error": str(e)}
 
@@ -133,35 +135,22 @@ st.title("🚀 AI Multi-Threaded Cloud Terminal")
 
 @st.fragment(run_every=30)
 def trading_dashboard():
-    # SYNC FROM FILE: Look for changes from other devices without breaking widgets
-    global_data = load_settings()
-    if global_data:
-        # We only sync 'logic' variables here, we don't touch widget keys to avoid the Exception
-        active_tickers = global_data.get("tickers", st.session_state.tickers)
-        bot_logic_active = global_data.get("run_bot", st.session_state.bot_toggle)
-    else:
-        active_tickers = st.session_state.tickers
-        bot_logic_active = st.session_state.bot_toggle
-
     try:
         acc = trading_client.get_account()
         pnl = float(acc.equity) - float(acc.last_equity)
         m1, m2 = st.columns(2)
         m1.metric("PORTFOLIO", f"${float(acc.equity):,.2f}")
         m2.metric("DAILY PnL", f"${pnl:.2f}", delta=f"{pnl:.2f}")
-
-        # Risk protection override
-        if pnl >= st.session_state.goal_input or pnl <= -abs(st.session_state.loss_limit):
-            bot_logic_active = False
-    except: pass
+        run_bot_active = False if (pnl >= st.session_state.profit_goal or pnl <= -abs(st.session_state.loss_limit)) else st.session_state.run_bot
+    except: run_bot_active = False
 
     st.subheader("⚡ Signal Feed")
     h1, h2, h3, h4 = st.columns([1, 1, 2, 1])
-    h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONFIDENCE"); h4.caption("ACTION")
+    h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONFIDENCE GAUGE"); h4.caption("ACTION")
 
-    if active_tickers:
+    if st.session_state.tickers:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            results = [f.result() for f in concurrent.futures.as_completed([ex.submit(scan_ticker, s, bot_logic_active, st.session_state.mode_radio, st.session_state.val_input) for s in active_tickers])]
+            results = [f.result() for f in concurrent.futures.as_completed([ex.submit(scan_ticker, s, run_bot_active, st.session_state.order_mode, st.session_state.order_val) for s in st.session_state.tickers])]
 
         best_ticker = None; max_conf = 0
         for res in results:
@@ -177,12 +166,16 @@ def trading_dashboard():
                 save_settings()
 
         st.markdown("---")
+        l, r = st.columns([1.5, 1])
         if best_ticker:
-            st.subheader(f"📈 Chart: {best_ticker[0]}")
-            st.line_chart(best_ticker[1][['close']].tail(50))
+            with l: st.subheader(f"📈 Chart: {best_ticker[0]}"); st.line_chart(best_ticker[1][['close']].tail(50))
+            with r:
+                st.subheader("🔗 Risk Matrix")
+                data = {res['symbol']: res['df'].set_index('timestamp')['close'] for res in results if "error" not in res}
+                if len(data) > 1: st.dataframe(pd.concat(data.values(), axis=1, keys=data.keys(), join='inner').corr().style.background_gradient(cmap='RdYlGn_r', axis=None), use_container_width=True)
 
     st.subheader("📜 Persistent Activity Log")
     st.code("\n".join(st.session_state.logs[-15:]))
+    save
 
-# Run the fragment
 trading_dashboard()
