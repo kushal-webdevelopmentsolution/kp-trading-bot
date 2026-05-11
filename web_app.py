@@ -12,6 +12,8 @@ from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetPo
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
+from alpaca.trading.requests import GetOrdersRequest
+from alpaca.trading.enums import QueryOrderStatus
 
 # --- 1. CONFIG & CLIENTS ---
 try:
@@ -163,10 +165,22 @@ def get_ai_prediction(df):
     except Exception as e:
         return 0.5, [0.5]*10
 
-# Helper for execution (Supports USD/Shares toggle and Extended Hours)
+# Helper for execution (Supports USD/Shares toggle, Extended Hours, and Duplicate Protection)
 def execute_trade(s, price, ai_conf, is_bot=False):
     try:
-        # --- MODE LOGIC: Calculate QTY based on USD or Shares ---
+        # --- 1. DUPLICATE PROTECTION: Check Positions and Pending Orders ---
+        # Check if we already have a position
+        pos = trading_client.get_all_positions()
+        if any(p.symbol == s for p in pos):
+            return # Exit silently if position exists
+
+        # Check if an order is already waiting to be filled
+        order_filter = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[s])
+        open_orders = trading_client.get_orders(filter=order_filter)
+        if open_orders:
+            return # Exit silently if order is pending
+
+        # --- 2. MODE LOGIC: Calculate QTY based on USD or Shares ---
         if st.session_state.order_mode == "USD":
             qty = int(st.session_state.order_val // price)
         else:
@@ -178,9 +192,9 @@ def execute_trade(s, price, ai_conf, is_bot=False):
 
         clock = trading_client.get_clock()
 
+        # --- 3. MARKET HOURS EXECUTION ---
         if clock.is_open:
             # REGULAR MARKET HOURS
-            # Note: We use qty for regular hours to support Trailing Stops
             trading_client.submit_order(MarketOrderRequest(
                 symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
@@ -192,15 +206,16 @@ def execute_trade(s, price, ai_conf, is_bot=False):
             ))
         else:
             # EXTENDED HOURS (Limit order required)
-            # Limit orders MUST use integer qty (no notional/USD during ext-hours)
             trading_client.submit_order(LimitOrderRequest(
                 symbol=s, qty=qty, limit_price=price, side=OrderSide.BUY, 
                 time_in_force=TimeInForce.DAY, extended_hours=True
             ))
 
+        # --- 4. LOGGING & NOTIFICATION ---
         msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price} | Conf: {ai_conf:.1%} | Mode: {st.session_state.order_mode}"
         add_log(msg)
         st.toast(msg, icon="🚀")
+
     except Exception as e:
         st.error(f"Trade Failed: {e}")
 
