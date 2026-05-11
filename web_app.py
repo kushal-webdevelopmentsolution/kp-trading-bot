@@ -22,7 +22,7 @@ except:
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-st.set_page_config(page_title="AI Elite Terminal", layout="wide")
+st.set_page_config(page_title="AI Alpha Terminal: Sector Elite", layout="wide")
 
 # --- 2. PERSISTENCE ENGINE ---
 SETTINGS_FILE = "settings.json"
@@ -68,22 +68,21 @@ init_session_state()
 with st.sidebar:
     st.header("🤖 AI Bot Control")
     st.toggle("Activate AI Bot", key="run_bot", on_change=update_val, args=("run_bot",))
-    st.slider("Min Confidence", 0.70, 0.98, key="ai_threshold", on_change=update_val, args=("ai_threshold",))
+    st.slider("AI Confidence Threshold", 0.70, 0.98, key="ai_threshold", on_change=update_val, args=("ai_threshold",))
 
     st.divider()
     st.header("🛑 Circuit Breaker")
     st.number_input("Daily Loss Limit ($)", key="daily_loss_limit", on_change=update_val, args=("daily_loss_limit",))
-    st.caption("Deactivates bot if daily PnL drops below this.")
 
     st.divider()
     st.header("🛡️ Strategy & Risk")
-    st.slider("Trailing Start %", 0.01, 0.10, key="lock_profit_pct", on_change=update_val, args=("lock_profit_pct",))
+    st.slider("Profit Trailing Start %", 0.01, 0.10, key="lock_profit_pct", on_change=update_val, args=("lock_profit_pct",))
     st.slider("Stop Loss %", 0.01, 0.10, key="trailing_pct", on_change=update_val, args=("trailing_pct",))
 
     st.divider()
     st.header("📂 Config")
-    st.multiselect("Watchlist", options=["SPY", "QQQ", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "GOOGL"], key="tickers", on_change=update_val, args=("tickers",))
-    st.radio("Mode", ["USD", "Shares"], key="order_mode", on_change=update_val, args=("order_mode",))
+    st.multiselect("Watchlist", options=["SPY", "QQQ", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "GOOGL", "META", "AMZN"], key="tickers", on_change=update_val, args=("tickers",))
+    st.radio("Size Mode", ["USD", "Shares"], key="order_mode", on_change=update_val, args=("order_mode",))
     st.number_input("Amount", key="order_val", on_change=update_val, args=("order_val",))
 
     if st.button("🚨 LIQUIDATE ALL", type="primary", use_container_width=True):
@@ -124,7 +123,6 @@ st.title("🚀 AI Alpha Terminal")
 
 @st.fragment(run_every=60)
 def live_ui():
-    # Performance & Circuit Breaker Logic
     daily_pnl = get_daily_pnl()
     vix = get_vix_proxy()
     panic = vix > st.session_state.vix_threshold
@@ -133,10 +131,10 @@ def live_ui():
     if breaker_tripped and st.session_state.run_bot:
         st.session_state.run_bot = False
         save_settings()
-        add_log(f"🛑 CIRCUIT BREAKER TRIPPED: Daily PnL (${daily_pnl:.2f}) exceeded limit.")
+        add_log(f"🛑 BREAKER TRIPPED: Daily PnL ${daily_pnl:.2f}")
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Daily PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
+    m1.metric("Daily PnL", f"${daily_pnl:.2f}")
     m2.metric("VIX Proxy", f"{vix:.2f}", delta="PANIC" if panic else "OK", delta_color="inverse")
     if breaker_tripped: m3.error("🚨 BREAKER TRIPPED")
     elif panic: m3.warning("⚠️ VOLATILITY HALT")
@@ -146,43 +144,52 @@ def live_ui():
     pos = trading_client.get_all_positions()
     if pos:
         cols = st.columns([1, 1, 1, 1, 1, 1, 0.5])
-        for col, head in zip(cols, ["SYMBOL", "AMOUNT", "P/L %", "TYPE", "STOP", "DIST", "EXIT"]): col.caption(head)
+        for col, head in zip(cols, ["SYMBOL", "AMOUNT", "P/L %", "STOP TYPE", "STOP PRICE", "DIST", "EXIT"]): col.caption(head)
         for p in pos:
             qty, mkt_val, curr_price = float(p.qty), float(p.market_value), float(p.current_price)
             avg_entry, pnl_pct = float(p.avg_entry_price), float(p.unrealized_plpc) * 100
+
             is_trailing = pnl_pct >= (st.session_state.lock_profit_pct * 100)
             stop_price = curr_price * (1-st.session_state.trailing_pct) if is_trailing else avg_entry * (1-st.session_state.trailing_pct)
             dist_pct = ((curr_price - stop_price) / curr_price) * 100
 
             c1, c2, c3, c4, c5, c6, c7 = st.columns([1, 1, 1, 1, 1, 1, 0.5])
             c1.write(f"**{p.symbol}**"); c2.write(f"${mkt_val:,.0f}"); c3.write(f"{pnl_pct:.2f}%")
-            c4.write("🔥" if is_trailing else "🧊"); c5.write(f"${stop_price:.2f}"); c6.write(f"{dist_pct:.1f}%")
+            c4.write("🔥 Trail" if is_trailing else "🧊 Base"); c5.write(f"${stop_price:.2f}"); c6.write(f"{dist_pct:.1f}%")
             if c7.button("✖", key=f"cl_{p.symbol}"):
-                trading_client.close_position(p.symbol)
-                add_log(f"Manual Close: {p.symbol}")
-                st.rerun()
-            if st.session_state.run_bot and curr_price <= stop_price:
-                trading_client.close_position(p.symbol)
-                add_log(f"🤖 Bot Exit: {p.symbol} ({pnl_pct:.2f}%)")
+                trading_client.close_position(p.symbol); add_log(f"Manual Close: {p.symbol}"); st.rerun()
 
-    st.subheader("⚡ Signals")
+    st.subheader("⚡ AI Confidence & Signal Feed")
+    prices_for_corr = {}
     for s in st.session_state.tickers:
         try:
             df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=100), feed=DataFeed.IEX)).df.reset_index()
             ai_conf, conf_hist = get_ai_prediction(df)
             price = float(df['close'].iloc[-1])
+            prices_for_corr[s] = df.set_index('timestamp')['close']
+
             s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
-            s1.write(f"**{s}**"); s2.write(f"${price:.2f}"); s3.progress(ai_conf)
-            with s4: st.line_chart(conf_hist, height=50)
+            s1.write(f"**{s}**"); s2.write(f"${price:.2f}")
+            s3.progress(ai_conf, text=f"AI: {ai_conf*100:.0f}%")
+            with s4: st.line_chart(conf_hist, height=50, use_container_width=True)
+
             if s5.button("Buy", key=f"b_{s}"):
                 qty = round(st.session_state.order_val/price, 2) if st.session_state.order_mode=="USD" else st.session_state.order_val
                 trading_client.submit_order(MarketOrderRequest(symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
                 add_log(f"Manual Buy: {s} @ {price}")
+
             if st.session_state.run_bot and not panic and not breaker_tripped and ai_conf >= st.session_state.ai_threshold:
                 qty = round(st.session_state.order_val/price, 2) if st.session_state.order_mode=="USD" else st.session_state.order_val
                 trading_client.submit_order(MarketOrderRequest(symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
-                add_log(f"🤖 AI Buy: {s} (Conf: {ai_conf:.2f})")
+                add_log(f"🤖 AI Buy Triggered: {s} (Confidence: {ai_conf:.2f})")
         except: continue
+
+    if len(prices_for_corr) > 1:
+        st.divider()
+        st.subheader("🕸️ Sector Correlation Matrix")
+        corr_df = pd.concat(prices_for_corr.values(), axis=1, keys=prices_for_corr.keys()).corr()
+        st.dataframe(corr_df.style.background_gradient(cmap='RdYlGn_r', axis=None), use_container_width=True)
+        st.caption("Lower correlation (red) suggests better diversification.")
 
     st.divider()
     st.subheader("📜 Trade History")
