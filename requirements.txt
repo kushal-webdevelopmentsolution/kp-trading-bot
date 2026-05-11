@@ -6,4 +6,5 @@ alpaca-py
 scikit-learn
 matplotlib
 textblob
+nltk
 
