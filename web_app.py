@@ -155,7 +155,7 @@ def get_ai_prediction(df):
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
-@st.fragment(run_every=30)
+@st.fragment(run_every=60)
 def live_ui():
     status = get_market_status()
     market_open = status["open"]
