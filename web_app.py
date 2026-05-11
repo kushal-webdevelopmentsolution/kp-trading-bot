@@ -152,29 +152,35 @@ def get_ai_prediction(df):
     except Exception as e:
         return 0.5, [0.5]*10
 
-# Helper for execution (handles both Manual and Bot)
 def execute_trade(is_bot=False):
     try:
         qty = int(st.session_state.order_val // price)
-        if qty < 1:
-            st.error(f"Order value too low for {s}")
-            return
+        if qty < 1: return
 
-            # 1. Entry Market Buy
+        clock = trading_client.get_clock()
+
+        if clock.is_open:
+            # REGULAR HOURS: Use native Trailing Stop
             trading_client.submit_order(MarketOrderRequest(
                 symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
-
-            # 2. Dynamic Trailing Stop (Lifts automatically with price)
             trading_client.submit_order(TrailingStopOrderRequest(
-                symbol=s, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,trail_percent=st.session_state.trailing_pct
+                symbol=s, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                trail_percent=st.session_state.trailing_pct
             ))
+        else:
+            # EXTENDED HOURS: Entry must be a Limit Order
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=s, qty=qty, limit_price=price, side=OrderSide.BUY, 
+                time_in_force=TimeInForce.DAY, extended_hours=True
+            ))
+            add_log(f"Extended Hours Entry: {s}. Virtual Trailing Stop Active.")
 
-            msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price} | Conf: {ai_conf:.1%}"
-            add_log(msg)
-            st.toast(msg, icon="🚀")
+        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price}"
+        add_log(msg); st.toast(msg, icon="🚀")
     except Exception as e:
         st.error(f"Trade Failed: {e}")
+
 
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
@@ -222,6 +228,29 @@ def live_ui():
             if c4.button("✖", key=f"cl_{p.symbol}"):
                 trading_client.close_position(p.symbol); add_log(f"Manual Close: {p.symbol}"); st.rerun()
 
+    clock = trading_client.get_clock()
+    for p in pos:
+    # If market is CLOSED, we manually monitor the trailing stop
+    if not clock.is_open:
+        current_price = float(p.current_price)
+        avg_entry = float(p.avg_entry_price)
+
+        # Calculate how much the price has dropped from entry
+        pnl_pct = (current_price - avg_entry) / avg_entry * 100
+
+        # If price drops below your trailing % threshold
+        if pnl_pct <= -st.session_state.trailing_pct:
+            # Manually liquidate using an Extended Hours Limit Order
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=p.symbol, 
+                qty=p.qty, 
+                limit_price=current_price, 
+                side=OrderSide.SELL, 
+                time_in_force=TimeInForce.DAY, 
+                extended_hours=True
+            ))
+            add_log(f"🌙 Extended Hours Stop-Loss Triggered: Sold {p.symbol} at {current_price}")
+            st.warning(f"Virtual Stop-Loss Triggered for {p.symbol}")
         # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
