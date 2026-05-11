@@ -59,6 +59,8 @@ def init_session_state():
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, "r") as f: st.session_state.logs = f.read().splitlines()
         else: st.session_state.logs = []
+    if "last_refresh" not in st.session_state:
+        st.session_state.last_refresh = time.time()
 
 init_session_state()
 
@@ -81,13 +83,22 @@ with st.sidebar:
     st.header("🛡️ Strategy Settings")
     st.number_input("Profit Goal ($)", key="global_profit_goal", on_change=save_settings)
     st.number_input("Loss Limit ($)", key="daily_loss_limit", on_change=save_settings)
-    st.slider("Stop Loss %", 0.01, 0.10, key="trailing_pct", on_change=save_settings)
 
     if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
         trading_client.close_all_positions(cancel_orders=True)
         add_log("EMERGENCY SHUTDOWN"); st.session_state.run_bot = False; save_settings(); st.rerun()
 
 # --- 4. ENGINES ---
+def get_market_status():
+    try:
+        clock = trading_client.get_clock()
+        if clock.is_open: return "OPEN", "#28a745"
+        now = datetime.now()
+        if (now.hour < 9 or (now.hour == 9 and now.minute < 30)) or (now.hour >= 16):
+            return "EXTENDED", "#fd7e14"
+        return "CLOSED", "#dc3545"
+    except: return "UNKNOWN", "gray"
+
 def get_account_details():
     try:
         acc = trading_client.get_account()
@@ -97,70 +108,76 @@ def get_account_details():
 def get_ai_prediction(df):
     try:
         df = df.copy()
-        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
+        df.ta.rsi(append=True); df.ta.macd(append=True)
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.002).astype(int)
         df = df.dropna()
-        features = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'MACD', 'ADX'])]
-        model = RandomForestClassifier(n_estimators=150, max_depth=10, random_state=42)
+        features = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'MACD'])]
+        model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
         model.fit(df[features][:-10], df['target'][:-10])
-        probs = [float(p) for p in model.predict_proba(df[features].tail(10))[:, 1]]
-        return probs[-1], probs, df['RSI_14'].iloc[-1], df['MACDh_12_26_9'].iloc[-1]
-    except: return 0.5, [0.5]*10, 50.0, 0.0
+        prob = float(model.predict_proba(df[features].tail(1))[:, 1])
+        return prob, df['RSI_14'].iloc[-1], df['MACDh_12_26_9'].iloc[-1]
+    except: return 0.5, 50.0, 0.0
 
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
-@st.fragment(run_every=30)
-def live_ui():
+@st.fragment(run_every=1)
+def dashboard_fragment():
+    # Countdown Logic
+    refresh_interval = 30
+    elapsed = time.time() - st.session_state.last_refresh
+    remaining = max(0, int(refresh_interval - elapsed))
+
+    if remaining == 0:
+        st.session_state.last_refresh = time.time()
+        st.rerun()
+
     cash, equity, last_equity = get_account_details()
+    m_text, m_color = get_market_status()
     daily_pnl = equity - last_equity
 
-    # --- Top Row: Portfolio & Balance ---
+    # --- Top Row ---
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("AVAILABLE CASH", f"${cash:,.2f}")
     b2.metric("PORTFOLIO EQUITY", f"${equity:,.2f}")
 
-    # Calculate Total Trade Amount (Market Value)
-    pos = trading_client.get_all_positions()
-    total_trade_amt = sum([float(p.market_value) for p in pos]) if pos else 0.0
-    b3.metric("TOTAL TRADE AMOUNT", f"${total_trade_amt:,.2f}")
-    b4.metric("DAILY PnL", f"${daily_pnl:,.2f}", delta=f"{daily_pnl:,.2f}")
+    # Market Status & Countdown
+    b3.markdown(f"""
+        <div style="background-color:{m_color}; padding:10px; border-radius:10px; text-align:center;">
+            <h3 style="color:white; margin:0;">MARKET {m_text}</h3>
+            <p style="color:white; margin:0; font-size: 0.8em;">Refreshing in {remaining}s</p>
+        </div>
+    """, unsafe_allow_html=True)
 
-    # --- Signals & Technical Factors ---
+    b4.metric("DAILY PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
+
+    # --- Signals ---
     st.subheader("⚡ AI Signal Feed & Technical Factors")
-    h1, h2, h3, h4, h5, h6 = st.columns([1, 1, 1, 1, 2, 1])
+    h1, h2, h3, h4, h5, h6 = st.columns([1,1,1,1,1,1])
     h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONF."); h4.caption("RSI"); h5.caption("MACD HIST"); h6.caption("ACTION")
 
     for s in st.session_state.tickers:
         try:
-            df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=100), feed=DataFeed.IEX)).df.reset_index()
-            ai_conf, conf_hist, rsi, macd_h = get_ai_prediction(df)
+            df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=60), feed=DataFeed.IEX)).df.reset_index()
+            ai_conf, rsi, macd_h = get_ai_prediction(df)
             price = float(df['close'].iloc[-1])
 
-            c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 2, 1])
+            c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
             c1.write(f"**{s}**")
             c2.write(f"${price:.2f}")
             c3.write(f"**{ai_conf*100:.0f}%**")
-
-            # RSI Indicator Logic
-            rsi_color = "red" if rsi > 70 else "green" if rsi < 30 else "gray"
-            c4.markdown(f":{rsi_color}[{rsi:.1f}]")
-
-            # MACD Histogram Display
-            macd_trend = "📈" if macd_h > 0 else "📉"
-            c5.write(f"{macd_trend} ({macd_h:.2f})")
-
+            c4.write(f"{rsi:.1f}")
+            c5.write(f"{'📈' if macd_h > 0 else '📉'} {macd_h:.2f}")
             if c6.button("Buy", key=f"b_{s}"):
-                q = round(st.session_state.order_val/price, 2) if st.session_state.order_mode=="USD" else st.session_state.order_val
+                q = round(st.session_state.order_val/price, 2)
                 trading_client.submit_order(MarketOrderRequest(symbol=s, qty=q, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
-                add_log(f"Manual Buy: {s} @ {price}")
+                add_log(f"Manual Buy: {s}")
         except: continue
 
-    # --- Trade History ---
     st.divider()
-    st.subheader("📜 Recent Trade Activity")
+    st.subheader("📜 Activity Log")
     if st.session_state.logs:
-        history_data = [{"Time": x.split(" | ")[0], "Activity": x.split(" | ")[1]} for x in reversed(st.session_state.logs[-15:])]
-        st.table(history_data)
+        for log in reversed(st.session_state.logs[-10:]):
+            st.text(log)
 
-live_ui()
+dashboard_fragment()
