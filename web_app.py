@@ -47,7 +47,7 @@ def add_log(msg):
 
 def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA"], "run_bot": False, "order_mode": "USD", 
-                "order_val": 100.0, "trailing_pct": 0.02, "profit_target": 0.05, 
+                "order_val": 1000.0, "trailing_pct": 0.02, "profit_target": 0.05, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.03,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
     if os.path.exists(SETTINGS_FILE):
@@ -65,6 +65,17 @@ init_session_state()
 
 # --- 3. SIDEBAR ---
 with st.sidebar:
+    st.header("🛒 Order Configuration")
+    # Toggle between USD (Dollar) and Shares (Stock)
+    # This updates st.session_state["order_mode"] automatically
+    st.selectbox("Order Mode", options=["USD", "Shares"], key="order_mode", on_change=save_settings)
+
+    # Dynamic Label and Value based on selection
+    if st.session_state.order_mode == "USD":
+        st.number_input("Order Amount ($)", min_value=1.0, step=10.0, key="order_val", on_change=save_settings)
+    else:
+        st.number_input("Number of Shares", min_value=1.0, step=1.0, key="order_val", on_change=save_settings)
+    st.divider()    
     st.header("🤖 Bot Control")
     st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings)
     st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings)
@@ -152,10 +163,15 @@ def get_ai_prediction(df):
     except Exception as e:
         return 0.5, [0.5]*10
 
-# Helper for execution (Updated to accept variables)
+# Helper for execution (Supports USD/Shares toggle and Extended Hours)
 def execute_trade(s, price, ai_conf, is_bot=False):
     try:
-        qty = int(st.session_state.order_val // price)
+        # --- MODE LOGIC: Calculate QTY based on USD or Shares ---
+        if st.session_state.order_mode == "USD":
+            qty = int(st.session_state.order_val // price)
+        else:
+            qty = int(st.session_state.order_val)
+
         if qty < 1:
             st.error(f"Order value too low for {s}")
             return
@@ -164,25 +180,30 @@ def execute_trade(s, price, ai_conf, is_bot=False):
 
         if clock.is_open:
             # REGULAR MARKET HOURS
+            # Note: We use qty for regular hours to support Trailing Stops
             trading_client.submit_order(MarketOrderRequest(
                 symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
+
+            # Trailing Stop (Lifts automatically with price)
             trading_client.submit_order(TrailingStopOrderRequest(
                 symbol=s, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
                 trail_percent=st.session_state.trailing_pct
             ))
         else:
             # EXTENDED HOURS (Limit order required)
+            # Limit orders MUST use integer qty (no notional/USD during ext-hours)
             trading_client.submit_order(LimitOrderRequest(
                 symbol=s, qty=qty, limit_price=price, side=OrderSide.BUY, 
                 time_in_force=TimeInForce.DAY, extended_hours=True
             ))
 
-        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price} | Conf: {ai_conf:.1%}"
+        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price} | Conf: {ai_conf:.1%} | Mode: {st.session_state.order_mode}"
         add_log(msg)
         st.toast(msg, icon="🚀")
     except Exception as e:
         st.error(f"Trade Failed: {e}")
+
 
 
 # --- 5. DASHBOARD UI ---
