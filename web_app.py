@@ -11,32 +11,9 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetPortfolioHistoryRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from sklearn.ensemble import RandomForestClassifier
-import nltk
-from alpaca.data.historical.news import NewsClient
-from alpaca.data.requests import NewsRequest
 from alpaca.trading.requests import MarketOrderRequest, TrailingStopOrderRequest
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-
-# --- 0. NLTK PATH & INITIALIZATION FIX ---
-@st.cache_resource
-def load_nltk():
-    # Explicitly set the path for Streamlit Cloud / appuser environments
-    nltk_path = "/home/appuser/nltk_data"
-    if nltk_path not in nltk.data.path:
-        nltk.data.path.append(nltk_path)
-
-    try:
-        # Check if lexicon exists in the custom path
-        nltk.data.find('sentiment/vader_lexicon.zip')
-    except (LookupError, Exception):
-        # Force download to the specific appuser directory
-        nltk.download('vader_lexicon', download_dir=nltk_path)
-
-    return SentimentIntensityAnalyzer()
-
-# Initialize
-sia = load_nltk()
-
+import xgboost as xgb
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 
 # --- 1. CONFIG & CLIENTS ---
 try:
@@ -46,15 +23,9 @@ except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
 
-# Initialize the Analyzer and News Client
-news_client = NewsClient(API_KEY, SECRET_KEY)
-
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
-
-
-
 
 # --- 2. PERSISTENCE ENGINE ---
 SETTINGS_FILE = "settings.json"
@@ -154,26 +125,48 @@ def get_daily_pnl():
 def get_ai_prediction(df, symbol):
     try:
         df = df.copy()
-        # Add more features for precision
+
+        # 1. ENHANCED FEATURE ENGINEERING
+        # Multi-timeframe trend signals
         df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
         df.ta.bbands(append=True); df.ta.atr(append=True)
-        df['target'] = (df['close'].shift(-1) > df['close'] * 1.001).astype(int)
+        df.ta.stoch(append=True); df.ta.ema(length=50, append=True) # Trend filter
+
+        # Relative Price Features (Normalization)
+        df['price_rel_ema'] = df['close'] / df['EMA_50']
+        df['volatility'] = df['close'].rolling(10).std()
+
+        # 2. ACCURACY TARGETING
+        # Predicting a 0.2% move in the next bar for higher signal quality
+        df['target'] = (df['close'].shift(-1) > df['close'] * 1.002).astype(int)
         df = df.dropna()
-        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'BBP', 'ADX', 'ATR'])]
 
-        # Increased estimators for higher accuracy
-        model = RandomForestClassifier(n_estimators=300, max_depth=12, random_state=42)
-        model.fit(df[features][:-10], df['target'][:-10])
-        tech_conf = float(model.predict_proba(df[features].tail(1))[:, 1])
+        features = [c for c in df.columns if any(x in c for x in 
+                   ['RSI', 'MACD', 'BBP', 'ADX', 'ATR', 'STOCH', 'EMA', 'price_rel', 'volatility'])]
 
-        # Get Sentiment (30% weight)
-        news = news_client.get_news(NewsRequest(symbols=symbol, limit=5))
-        sent = [sia.polarity_scores(n.headline)['compound'] for n in news.news]
-        news_conf = (sum(sent)/len(sent) + 1)/2 if sent else 0.5
+        # 3. MULTI-STRATEGY ENSEMBLE (RF + XGBOOST)
+        rf_model = RandomForestClassifier(n_estimators=300, max_depth=12, random_state=42)
+        xgb_model = xgb.XGBClassifier(n_estimators=300, learning_rate=0.05, max_depth=6, random_state=42)
 
-        final_conf = (tech_conf * 0.7) + (news_conf * 0.3)
-        return final_conf, [float(p) for p in model.predict_proba(df[features].tail(10))[:, 1]]
-    except: return 0.5, [0.5]*10
+        # Voting Ensemble for higher stability and precision
+        ensemble = VotingClassifier(
+            estimators=[('rf', rf_model), ('xgb', xgb_model)],
+            voting='soft'
+        )
+
+        # Split for Time-Series Cross-Validation
+        train_df = df.iloc[:-20]
+        ensemble.fit(train_df[features], train_df['target'])
+
+        # 4. FINAL SIGNAL EXTRACTION
+        # Get probability of the "Buy" signal
+        final_probs = ensemble.predict_proba(df[features].tail(10))[:, 1]
+        final_conf = float(final_probs[-1])
+
+        return final_conf, [float(p) for p in final_probs]
+    except Exception as e:
+        print(f"Error in prediction: {e}")
+        return 0.5, [0.5]*10
 
 
 # --- 5. DASHBOARD UI ---
