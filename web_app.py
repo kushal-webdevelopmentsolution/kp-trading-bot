@@ -59,8 +59,6 @@ def init_session_state():
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, "r") as f: st.session_state.logs = f.read().splitlines()
         else: st.session_state.logs = []
-    if "last_refresh" not in st.session_state:
-        st.session_state.last_refresh = time.time()
 
 init_session_state()
 
@@ -92,11 +90,13 @@ with st.sidebar:
 def get_market_status():
     try:
         clock = trading_client.get_clock()
-        if clock.is_open: return "OPEN", "#28a745"
+        if clock.is_open:
+            return "OPEN", "green"
+        # Check if currently in pre-market or after-hours
         now = datetime.now()
         if (now.hour < 9 or (now.hour == 9 and now.minute < 30)) or (now.hour >= 16):
-            return "EXTENDED", "#fd7e14"
-        return "CLOSED", "#dc3545"
+            return "EXTENDED", "orange"
+        return "CLOSED", "red"
     except: return "UNKNOWN", "gray"
 
 def get_account_details():
@@ -121,39 +121,29 @@ def get_ai_prediction(df):
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
-@st.fragment(run_every=1)
-def dashboard_fragment():
-    # Countdown Logic
-    refresh_interval = 30
-    elapsed = time.time() - st.session_state.last_refresh
-    remaining = max(0, int(refresh_interval - elapsed))
-
-    if remaining == 0:
-        st.session_state.last_refresh = time.time()
-        st.rerun()
-
+@st.fragment(run_every=30)
+def live_ui():
     cash, equity, last_equity = get_account_details()
     m_text, m_color = get_market_status()
-    daily_pnl = equity - last_equity
 
-    # --- Top Row ---
+    # --- Top Row: Portfolio & Market Status ---
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("AVAILABLE CASH", f"${cash:,.2f}")
     b2.metric("PORTFOLIO EQUITY", f"${equity:,.2f}")
 
-    # Market Status & Countdown
+    # Market Status with Color Theme
     b3.markdown(f"""
         <div style="background-color:{m_color}; padding:10px; border-radius:10px; text-align:center;">
             <h3 style="color:white; margin:0;">MARKET {m_text}</h3>
-            <p style="color:white; margin:0; font-size: 0.8em;">Refreshing in {remaining}s</p>
         </div>
     """, unsafe_allow_html=True)
 
+    daily_pnl = equity - last_equity
     b4.metric("DAILY PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
 
-    # --- Signals ---
+    # --- Signals & Technical Factors ---
     st.subheader("⚡ AI Signal Feed & Technical Factors")
-    h1, h2, h3, h4, h5, h6 = st.columns([1,1,1,1,1,1])
+    h1, h2, h3, h4, h5, h6 = st.columns()
     h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONF."); h4.caption("RSI"); h5.caption("MACD HIST"); h6.caption("ACTION")
 
     for s in st.session_state.tickers:
@@ -162,22 +152,24 @@ def dashboard_fragment():
             ai_conf, rsi, macd_h = get_ai_prediction(df)
             price = float(df['close'].iloc[-1])
 
-            c1, c2, c3, c4, c5, c6 = st.columns([1,1,1,1,1,1])
+            c1, c2, c3, c4, c5, c6 = st.columns()
             c1.write(f"**{s}**")
             c2.write(f"${price:.2f}")
             c3.write(f"**{ai_conf*100:.0f}%**")
             c4.write(f"{rsi:.1f}")
             c5.write(f"{'📈' if macd_h > 0 else '📉'} {macd_h:.2f}")
+
             if c6.button("Buy", key=f"b_{s}"):
                 q = round(st.session_state.order_val/price, 2)
                 trading_client.submit_order(MarketOrderRequest(symbol=s, qty=q, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
                 add_log(f"Manual Buy: {s}")
         except: continue
 
+    # --- History ---
     st.divider()
     st.subheader("📜 Activity Log")
     if st.session_state.logs:
         for log in reversed(st.session_state.logs[-10:]):
             st.text(log)
 
-dashboard_fragment()
+live_ui()
