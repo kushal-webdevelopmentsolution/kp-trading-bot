@@ -17,6 +17,22 @@ from alpaca.data.requests import NewsRequest
 from alpaca.trading.requests import MarketOrderRequest, TrailingStopOrderRequest
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
+# --- 0. NLTK FIX (Replaces your old block) ---
+@st.cache_resource
+def load_nltk():
+    try:
+        # Streamlit-friendly check for the lexicon
+        nltk.data.find('sentiment/vader_lexicon.zip')
+    except:
+        nltk.download('vader_lexicon')
+    return SentimentIntensityAnalyzer()
+
+# Initialize the Analyzer and News Client
+sia = load_nltk()
+news_client = NewsClient(API_KEY, SECRET_KEY)
+
+
+
 # --- 1. CONFIG & CLIENTS ---
 try:
     API_KEY = st.secrets["API_KEY"]
@@ -29,14 +45,7 @@ data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
 
-# Add this under your API key block
-try:
-    nltk.data.find('vader_lexicon')
-except LookupError:
-    nltk.download('vader_lexicon')
 
-sia = SentimentIntensityAnalyzer()
-news_client = NewsClient(API_KEY, SECRET_KEY) # New client
 
 
 # --- 2. PERSISTENCE ENGINE ---
@@ -64,6 +73,7 @@ def init_session_state():
                 "order_val": 100.0, "trailing_pct": 0.5, "profit_target": 0.05, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.03,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
+
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f: defaults.update(json.load(f))
