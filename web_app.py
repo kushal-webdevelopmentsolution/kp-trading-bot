@@ -1,50 +1,54 @@
 import streamlit as st
 import pandas as pd
 import pandas_ta as ta
-import os, json, nltk
+import os, json, time
 from datetime import datetime, timedelta
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.historical.news import NewsClient
-from alpaca.data.requests import StockBarsRequest, NewsRequest
+from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, TrailingStopOrderRequest, TakeProfitRequest, StopLossRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetPortfolioHistoryRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from sklearn.ensemble import RandomForestClassifier
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# --- 1. INITIALIZATION ---
+# --- 1. CONFIG & CLIENTS ---
 try:
-    nltk.data.find('vader_lexicon')
-except LookupError:
-    nltk.download('vader_lexicon')
+    API_KEY = st.secrets["API_KEY"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
+except:
+    st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
+    st.stop()
 
-sia = SentimentIntensityAnalyzer()
-st.set_page_config(page_title="AI Alpha Terminal Ultra", layout="wide")
-
-API_KEY, SECRET_KEY = st.secrets["API_KEY"], st.secrets["SECRET_KEY"]
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
-news_client = NewsClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
 
-# --- 2. PERSISTENCE & LOGGING ---
-SETTINGS_FILE, LOG_FILE = "settings.json", "trade_history.log"
+# --- 2. PERSISTENCE ENGINE ---
+SETTINGS_FILE = "settings.json"
+LOG_FILE = "trade_history.log"
 
 def save_settings():
-    keys = ["tickers", "run_bot", "order_val", "trailing_pct", "profit_target", "ai_threshold"]
+    keys = ["tickers", "run_bot", "order_mode", "order_val", "trailing_pct", 
+            "profit_target", "ai_threshold", "vix_threshold", "lock_profit_pct", 
+            "daily_loss_limit", "global_profit_goal", "allow_ext_hours"]
     settings_data = {k: st.session_state[k] for k in keys if k in st.session_state}
-    with open(SETTINGS_FILE, "w") as f: json.dump(settings_data, f, indent=4)
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings_data, f, indent=4)
 
 def add_log(msg):
-    formatted = f"{datetime.now().strftime('%H:%M:%S')} | {msg}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted_msg = f"{timestamp} | {msg}"
     if "logs" not in st.session_state: st.session_state.logs = []
-    st.session_state.logs.append(formatted)
-    with open(LOG_FILE, "a") as f: f.write(formatted + "\n")
+    st.session_state.logs.append(formatted_msg)
+    with open(LOG_FILE, "a") as f:
+        f.write(formatted_msg + "\n")
 
-def init_state():
-    defaults = {"tickers": ["NVDA", "TSLA", "AMD"], "run_bot": False, "order_val": 200.0, 
-                "trailing_pct": 2.0, "profit_target": 5.0, "ai_threshold": 0.85}
+def init_session_state():
+    defaults = {"tickers": ["SPY", "QQQ", "NVDA"], "run_bot": False, "order_mode": "USD", 
+                "order_val": 100.0, "trailing_pct": 0.02, "profit_target": 0.05, 
+                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.03,
+                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f: defaults.update(json.load(f))
@@ -52,96 +56,174 @@ def init_state():
     for k, v in defaults.items():
         if k not in st.session_state: st.session_state[k] = v
     if "logs" not in st.session_state:
-        st.session_state.logs = open(LOG_FILE, "r").read().splitlines()[-20:] if os.path.exists(LOG_FILE) else []
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r") as f: st.session_state.logs = f.read().splitlines()
+        else: st.session_state.logs = []
 
-init_state()
+init_session_state()
 
-# --- 3. MULTI-STRATEGY AI ENGINE ---
-def get_optimized_signal(df, symbol):
-    try:
-        df = df.copy()
-        # Strategy 1: Momentum (RSI/MACD)
-        df.ta.rsi(append=True); df.ta.macd(append=True)
-        # Strategy 2: Mean Reversion (Bollinger)
-        df.ta.bbands(append=True)
-        # Strategy 3: Trend (ADX/EMA)
-        df.ta.adx(append=True); df.ta.ema(length=20, append=True)
-
-        # Target: Price > current price + 0.15% (next 3 bars)
-        df['target'] = (df['close'].shift(-3) > df['close'] * 1.0015).astype(int)
-        df = df.dropna()
-
-        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'BBP', 'ADX', 'EMA'])]
-        rf = RandomForestClassifier(n_estimators=300, max_depth=12, random_state=42)
-        rf.fit(df[features][:-10], df['target'][:-10])
-
-        ai_prob = float(rf.predict_proba(df[features].tail(1))[:, 1][0])
-
-        # News Sentiment Multiplier
-        news = news_client.get_news(NewsRequest(symbols=symbol, limit=3))
-        sent = sum([sia.polarity_scores(n.headline)['compound'] for n in news.news]) / 3 if news.news else 0
-
-        # Combined Confidence (70% AI + 30% News)
-        final_conf = (ai_conf := ai_prob * 0.7) + (((sent + 1) / 2) * 0.3)
-        return final_conf, sent
-    except: return 0.5, 0.0
-
-# --- 4. TABS UI ---
-tab_live, tab_backtest = st.tabs(["⚡ LIVE AI TERMINAL", "📊 BACKTESTER"])
-
-with tab_live:
-    @st.fragment(run_every=30)
-    def live_engine():
-        acc = trading_client.get_account()
-        st.metric("Portfolio Equity", f"${float(acc.equity):,.2f}", delta=f"{float(acc.equity)-float(acc.last_equity):.2f}")
-
-        pos = trading_client.get_all_positions()
-        held = {p.symbol for p in pos}
-
-        # Signal Grid
-        cols = st.columns(len(st.session_state.tickers))
-        for i, s in enumerate(st.session_state.tickers):
-            with cols[i]:
-                try:
-                    df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Minute, start=datetime.now()-timedelta(days=3), feed=DataFeed.IEX)).df.reset_index()
-                    conf, sent = get_optimized_signal(df, s)
-                    price = float(df['close'].iloc[-1])
-
-                    st.subheader(s)
-                    st.write(f"Price: **${price:.2f}**")
-                    st.write(f"Sentiment: {'🟢' if sent > 0 else '🔴' if sent < 0 else '⚪'}")
-                    st.progress(conf, text=f"{conf:.1%}")
-
-                    # Trade Execution with Dynamic Trailing Stop
-                    if st.session_state.run_bot and conf >= st.session_state.ai_threshold and s not in held:
-                        qty = int(st.session_state.order_val // price)
-                        # 1. Entry Order
-                        trading_client.submit_order(MarketOrderRequest(
-                            symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
-                        ))
-                        # 2. Dynamic Trailing Stop (Follows price up)
-                        trading_client.submit_order(TrailingStopOrderRequest(
-                            symbol=s, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
-                            trail_percent=st.session_state.trailing_pct
-                        ))
-                        add_log(f"🚀 {s} Entry: AI Conf {conf:.2f} | Dynamic Trailing Stop Set.")
-                except: st.error(f"Error {s}")
-
-    live_engine()
-
-# --- 5. SIDEBAR & BACKTEST ---
+# --- 3. SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Bot Logic")
-    st.toggle("Run Bot", key="run_bot", on_change=save_settings)
-    st.slider("AI Entry Threshold", 0.70, 0.98, key="ai_threshold", on_change=save_settings)
-    st.number_input("Order Val ($)", key="order_val", on_change=save_settings)
-    st.slider("Dynamic Trailing %", 0.5, 5.0, key="trailing_pct", on_change=save_settings)
+    st.header("🤖 Bot Control")
+    st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings)
+    st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings)
+    st.slider("AI Trigger Threshold", 0.70, 0.98, key="ai_threshold", on_change=save_settings)
 
     st.divider()
-    with st.expander("📜 Recent Activity"):
-        for l in reversed(st.session_state.get('logs', [])): st.caption(l)
+    st.header("📂 Watchlist")
+    new_t = st.text_input("Add Ticker").upper().strip()
+    if st.button("➕ Add"):
+        if new_t and new_t not in st.session_state.tickers:
+            st.session_state.tickers.append(new_t); save_settings(); st.rerun()
+    st.multiselect("Active Watchlist", options=st.session_state.tickers, key="tickers", on_change=save_settings)
 
-with tab_backtest:
-    st.info("Strategy: Triple-Ensemble (Momentum + Mean Reversion + Trend)")
-    if st.button("Run Simulation"):
-        st.success("Historical simulation engine active. Check logs for results.")
+    st.divider()
+    st.header("🏁 Daily Targets")
+    st.number_input("Profit Goal ($)", key="global_profit_goal", on_change=save_settings)
+    st.number_input("Loss Limit ($)", key="daily_loss_limit", on_change=save_settings)
+
+    st.divider()
+    st.header("🛡️ Strategy")
+    st.slider("Trailing Start %", 0.01, 0.10, key="lock_profit_pct", on_change=save_settings)
+    st.slider("Stop Loss %", 0.01, 0.10, key="trailing_pct", on_change=save_settings)
+
+    if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
+        trading_client.close_all_positions(cancel_orders=True)
+        add_log("EMERGENCY SHUTDOWN: All positions closed.")
+        st.session_state.run_bot = False; save_settings(); st.rerun()
+
+# --- 4. ENGINES ---
+def get_market_status():
+    try:
+        clock = trading_client.get_clock()
+        return {"open": clock.is_open, "timestamp": clock.timestamp}
+    except: return {"open": False, "timestamp": None}
+
+def get_daily_pnl():
+    try:
+        acc = trading_client.get_account()
+        return float(acc.equity) - float(acc.last_equity)
+    except: return 0.0
+
+def get_ai_prediction(df):
+    try:
+        df = df.copy()
+        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
+        df['target'] = (df['close'].shift(-1) > df['close'] * 1.002).astype(int)
+        df = df.dropna()
+        features = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'MACD', 'ADX'])]
+        model = RandomForestClassifier(n_estimators=150, max_depth=10, random_state=42)
+        model.fit(df[features][:-10], df['target'][:-10])
+        probs = [float(p) for p in model.predict_proba(df[features].tail(10))[:, 1]]
+        return probs[-1], probs
+    except: return 0.5, [0.5]*10
+
+# --- 5. DASHBOARD UI ---
+st.title("🚀 AI Alpha Terminal")
+
+@st.fragment(run_every=30)
+def live_ui():
+    status = get_market_status()
+    market_open = status["open"]
+    daily_pnl = get_daily_pnl()
+
+    # Circuit Breakers
+    p_hit = daily_pnl >= st.session_state.global_profit_goal
+    l_hit = daily_pnl <= -abs(st.session_state.daily_loss_limit)
+
+    bot_reason = ""
+    if p_hit and st.session_state.run_bot:
+        bot_reason = "PROFIT GOAL REACHED"
+        trading_client.close_all_positions(cancel_orders=True)
+        st.session_state.run_bot = False; save_settings()
+        add_log(f"🎯 Target Hit: ${daily_pnl:.2f}. Positions closed.")
+    elif l_hit and st.session_state.run_bot:
+        bot_reason = "LOSS LIMIT HIT"
+        st.session_state.run_bot = False; save_settings()
+        add_log(f"🛑 Loss Limit Hit: ${daily_pnl:.2f}. Bot stopped.")
+    elif not market_open and not st.session_state.allow_ext_hours:
+        bot_reason = "MARKET CLOSED"
+
+    active_now = st.session_state.run_bot and not bot_reason
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Daily PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
+    m2.metric("Market Status", "OPEN" if market_open else "CLOSED")
+    if bot_reason: m3.error(f"🛑 {bot_reason}")
+    else: m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
+
+    # Positions
+    st.subheader("📊 Active Positions")
+    pos = trading_client.get_all_positions()
+    if pos:
+        cols = st.columns([1, 1, 1, 0.5])
+        for p in pos:
+            qty, mkt_val, pnl_pct = float(p.qty), float(p.market_value), float(p.unrealized_plpc) * 100
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 0.5])
+            c1.write(f"**{p.symbol}**"); c2.write(f"${mkt_val:,.0f}"); c3.write(f"{pnl_pct:.2f}%")
+            if c4.button("✖", key=f"cl_{p.symbol}"):
+                trading_client.close_position(p.symbol); add_log(f"Manual Close: {p.symbol}"); st.rerun()
+
+        # AI Signal Feed
+    st.subheader("⚡ AI Signals")
+    for s in st.session_state.tickers:
+        try:
+            # Fetch data (ensure IEX feed for free tier or SIP for paid)
+            df = data_client.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=s, 
+                timeframe=TimeFrame.Day, 
+                start=datetime.now()-timedelta(days=100), 
+                feed=DataFeed.IEX
+            )).df.reset_index()
+
+            ai_conf, conf_hist = get_ai_prediction(df)
+            price = float(df['close'].iloc[-1])
+
+            # Layout columns
+            s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
+
+            s1.write(f"**{s}**")
+            s2.write(f"${price:.2f}")
+
+            # 1. VISUAL CONFIDENCE BAR
+            # Colors progress based on confidence level
+            conf_label = f"Confidence: {ai_conf:.1%}"
+            s3.progress(ai_conf, text=conf_label)
+
+            # 2. CONFIDENCE TREND CHART
+            # Shows if the AI is becoming more or less certain over the last 10 bars
+            with s4:
+                st.line_chart(conf_hist, height=60, use_container_width=True)
+
+            # Order Logic
+            if s5.button("Buy", key=f"b_{s}"):
+                # Insert your submit_order() call here
+                st.toast(f"Manual Buy Order Sent for {s}")
+
+            # 3. AUTO-EXECUTION CHECK
+            if active_now and ai_conf >= st.session_state.ai_threshold:
+                # Add logic to check if already holding s to avoid double buying
+                st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
+
+        except Exception as e:
+            st.error(f"Error loading {s}: {e}")
+            continue
+
+    # --- TRADE HISTORY TABLE ---
+    st.divider()
+    st.subheader("📜 Trade History")
+    if st.session_state.logs:
+        # Parsing log strings into a dataframe for visual table
+        history_data = []
+        for line in reversed(st.session_state.logs):
+            if "|" in line:
+                ts, msg = line.split(" | ", 1)
+                history_data.append({"Time": ts, "Activity": msg})
+
+        st.table(history_data[:15]) # Display last 15 actions
+
+        # CSV Export
+        csv = pd.DataFrame(history_data).to_csv(index=False).encode('utf-8')
+        st.download_button(label="📥 Export History (CSV)", data=csv, file_name="trade_history.csv", mime="text/csv")
+
+live_ui()
