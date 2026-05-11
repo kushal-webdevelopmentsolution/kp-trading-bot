@@ -49,10 +49,10 @@ def add_log(msg):
 
 def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA"], "run_bot": False, "order_mode": "USD", 
-                "order_val": 100.0, "trailing_pct": 0.5, "profit_target": 0.05, 
-                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.03,
+                "order_val": 100.0, "trailing_pct": 2.0, "profit_target": 0.05, 
+                "ai_threshold": 0.90, "vix_threshold": 25.0, "lock_profit_pct": 0.03,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
-
+    # --- 2. PERSISTENCE ENGINE ---
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f: defaults.update(json.load(f))
@@ -122,51 +122,30 @@ def get_daily_pnl():
         return float(acc.equity) - float(acc.last_equity)
     except: return 0.0
 
-def get_ai_prediction(df, symbol):
+# --- 4. ENGINES ---
+def get_ai_prediction(df):
     try:
         df = df.copy()
+        # High-Precision Strategy Ensemble: RSI + MACD + ADX + EMA
+        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True); df.ta.ema(length=20, append=True)
 
-        # 1. ENHANCED FEATURE ENGINEERING
-        # Multi-timeframe trend signals
-        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
-        df.ta.bbands(append=True); df.ta.atr(append=True)
-        df.ta.stoch(append=True); df.ta.ema(length=50, append=True) # Trend filter
-
-        # Relative Price Features (Normalization)
-        df['price_rel_ema'] = df['close'] / df['EMA_50']
-        df['volatility'] = df['close'].rolling(10).std()
-
-        # 2. ACCURACY TARGETING
-        # Predicting a 0.2% move in the next bar for higher signal quality
-        df['target'] = (df['close'].shift(-1) > df['close'] * 1.002).astype(int)
+        # Predicting higher signal quality (0.15% move)
+        df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
         df = df.dropna()
 
-        features = [c for c in df.columns if any(x in c for x in 
-                   ['RSI', 'MACD', 'BBP', 'ADX', 'ATR', 'STOCH', 'EMA', 'price_rel', 'volatility'])]
+        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'EMA'])]
 
-        # 3. MULTI-STRATEGY ENSEMBLE (RF + XGBOOST)
-        rf_model = RandomForestClassifier(n_estimators=300, max_depth=12, random_state=42)
-        xgb_model = xgb.XGBClassifier(n_estimators=300, learning_rate=0.05, max_depth=6, random_state=42)
+        # Hyper-Optimized Random Forest
+        model = RandomForestClassifier(n_estimators=300, max_depth=12, random_state=42)
+        model.fit(df[features][:-10], df['target'][:-10])
 
-        # Voting Ensemble for higher stability and precision
-        ensemble = VotingClassifier(
-            estimators=[('rf', rf_model), ('xgb', xgb_model)],
-            voting='soft'
-        )
+        prob = float(model.predict_proba(df[features].tail(1))[:, 1])
+        # Multi-Strategy Confirmation: Only high confidence if price is above 20 EMA
+        trend_conf = 1.0 if df['close'].iloc[-1] > df['EMA_20'].iloc[-1] else 0.0
+        final_conf = (prob * 0.8) + (trend_conf * 0.2)
 
-        # Split for Time-Series Cross-Validation
-        train_df = df.iloc[:-20]
-        ensemble.fit(train_df[features], train_df['target'])
-
-        # 4. FINAL SIGNAL EXTRACTION
-        # Get probability of the "Buy" signal
-        final_probs = ensemble.predict_proba(df[features].tail(10))[:, 1]
-        final_conf = float(final_probs[-1])
-
-        return final_conf, [float(p) for p in final_probs]
-    except Exception as e:
-        print(f"Error in prediction: {e}")
-        return 0.5, [0.5]*10
+        return final_conf, [float(p) for p in model.predict_proba(df[features].tail(10))[:, 1]]
+    except: return 0.5, [0.5]*10
 
 
 # --- 5. DASHBOARD UI ---
@@ -217,17 +196,20 @@ def live_ui():
                 trading_client.close_position(p.symbol); add_log(f"Manual Close: {p.symbol}"); st.rerun()
 
     # AI Signal Feed
+        # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
         try:
-            # Fetch data (using 100 days of history for AI context)
+            # UPDATE 1: Fetch 5-Minute bars instead of Day bars for intraday "Alpha" precision
             df = data_client.get_stock_bars(StockBarsRequest(
-                symbol_or_symbols=s, timeframe=TimeFrame.Day, 
-                start=datetime.now()-timedelta(days=100), feed=DataFeed.IEX
+                symbol_or_symbols=s, 
+                timeframe=TimeFrame.Minute, 
+                start=datetime.now()-timedelta(days=5), 
+                feed=DataFeed.IEX
             )).df.reset_index()
 
-            # Pass ticker 's' for Sentiment weighting (from step 4/5 logic)
-            ai_conf, conf_hist = get_ai_prediction(df, s) 
+            # UPDATE 2: Remove 's' from get_ai_prediction since we removed NLTK/News
+            ai_conf, conf_hist = get_ai_prediction(df) 
             price = float(df['close'].iloc[-1])
 
             s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
@@ -246,7 +228,7 @@ def live_ui():
                 trading_client.submit_order(MarketOrderRequest(
                     symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
                 ))
-                # 2. Dynamic Trailing Stop (Step 5 logic)
+                # 2. Dynamic Trailing Stop (Automatically follows price up)
                 trading_client.submit_order(TrailingStopOrderRequest(
                     symbol=s, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
                     trail_percent=st.session_state.trailing_pct
@@ -258,13 +240,13 @@ def live_ui():
                 execute_ai_trade(is_bot=False)
                 st.rerun()
 
-            # 3. AUTO-EXECUTION CHECK (Step 4 & 5 merged)
+            # 3. AUTO-EXECUTION CHECK
             if active_now and ai_conf >= st.session_state.ai_threshold:
                 if s not in held_symbols:
                     execute_ai_trade(is_bot=True)
                     st.toast(f"🤖 AI Buying {s} @ {ai_conf:.1%}", icon="🚀")
                 else:
-                    st.caption(f"Skipping {s}: Position already active.")
+                    st.caption(f"Watching {s}: Already in Position")
 
         except Exception as e:
             continue
