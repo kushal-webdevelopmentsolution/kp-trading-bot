@@ -8,11 +8,13 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetPortfolioHistoryRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, StopLossRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from sklearn.ensemble import RandomForestClassifier
 
 # --- 1. CONFIG & CLIENTS ---
+st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
+
 try:
     API_KEY = st.secrets["API_KEY"]
     SECRET_KEY = st.secrets["SECRET_KEY"]
@@ -22,9 +24,8 @@ except:
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
 
-# --- 2. PERSISTENCE ENGINE ---
+# --- 2. PERSISTENCE & STATE ---
 SETTINGS_FILE = "settings.json"
 LOG_FILE = "trade_history.log"
 
@@ -62,37 +63,7 @@ def init_session_state():
 
 init_session_state()
 
-# --- 3. SIDEBAR ---
-with st.sidebar:
-    st.header("🤖 Bot Control")
-    st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings)
-    st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings)
-    st.slider("AI Trigger Threshold", 0.70, 0.98, key="ai_threshold", on_change=save_settings)
-
-    st.divider()
-    st.header("📂 Watchlist")
-    new_t = st.text_input("Add Ticker").upper().strip()
-    if st.button("➕ Add"):
-        if new_t and new_t not in st.session_state.tickers:
-            st.session_state.tickers.append(new_t); save_settings(); st.rerun()
-    st.multiselect("Active Watchlist", options=st.session_state.tickers, key="tickers", on_change=save_settings)
-
-    st.divider()
-    st.header("🏁 Daily Targets")
-    st.number_input("Profit Goal ($)", key="global_profit_goal", on_change=save_settings)
-    st.number_input("Loss Limit ($)", key="daily_loss_limit", on_change=save_settings)
-
-    st.divider()
-    st.header("🛡️ Strategy")
-    st.slider("Trailing Start %", 0.01, 0.10, key="lock_profit_pct", on_change=save_settings)
-    st.slider("Stop Loss %", 0.01, 0.10, key="trailing_pct", on_change=save_settings)
-
-    if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
-        trading_client.close_all_positions(cancel_orders=True)
-        add_log("EMERGENCY SHUTDOWN: All positions closed.")
-        st.session_state.run_bot = False; save_settings(); st.rerun()
-
-# --- 4. ENGINES ---
+# --- 3. LOGIC ENGINES ---
 def get_market_status():
     try:
         clock = trading_client.get_clock()
@@ -112,13 +83,38 @@ def get_ai_prediction(df):
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.002).astype(int)
         df = df.dropna()
         features = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'MACD', 'ADX'])]
-        model = RandomForestClassifier(n_estimators=150, max_depth=10, random_state=42)
+        model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
         model.fit(df[features][:-10], df['target'][:-10])
         probs = [float(p) for p in model.predict_proba(df[features].tail(10))[:, 1]]
         return probs[-1], probs
     except: return 0.5, [0.5]*10
 
-# --- 5. DASHBOARD UI ---
+# --- 4. SIDEBAR CONTROLS ---
+with st.sidebar:
+    st.header("🤖 Bot Control")
+    st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings)
+    st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings)
+    st.slider("AI Trigger Threshold", 0.70, 0.98, key="ai_threshold", on_change=save_settings)
+
+    st.divider()
+    st.header("📂 Watchlist")
+    new_t = st.text_input("Add Ticker").upper().strip()
+    if st.button("➕ Add"):
+        if new_t and new_t not in st.session_state.tickers:
+            st.session_state.tickers.append(new_t); save_settings(); st.rerun()
+    st.multiselect("Active Watchlist", options=st.session_state.tickers, key="tickers", on_change=save_settings)
+
+    st.divider()
+    st.header("🏁 Daily Targets")
+    st.number_input("Profit Goal ($)", key="global_profit_goal", on_change=save_settings)
+    st.number_input("Loss Limit ($)", key="daily_loss_limit", on_change=save_settings)
+
+    if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
+        trading_client.close_all_positions(cancel_orders=True)
+        add_log("EMERGENCY SHUTDOWN: All positions closed.")
+        st.session_state.run_bot = False; save_settings(); st.rerun()
+
+# --- 5. MAIN DASHBOARD ---
 st.title("🚀 AI Alpha Terminal")
 
 @st.fragment(run_every=30)
@@ -155,54 +151,72 @@ def live_ui():
     # Positions
     st.subheader("📊 Active Positions")
     pos = trading_client.get_all_positions()
+    held_symbols = {p.symbol for p in pos}
+
     if pos:
-        cols = st.columns([1, 1, 1, 0.5])
         for p in pos:
-            qty, mkt_val, pnl_pct = float(p.qty), float(p.market_value), float(p.unrealized_plpc) * 100
+            mkt_val, pnl_pct = float(p.market_value), float(p.unrealized_plpc) * 100
             c1, c2, c3, c4 = st.columns([1, 1, 1, 0.5])
-            c1.write(f"**{p.symbol}**"); c2.write(f"${mkt_val:,.0f}"); c3.write(f"{pnl_pct:.2f}%")
+            c1.write(f"**{p.symbol}**")
+            c2.write(f"${mkt_val:,.0f}")
+            c3.write(f"{pnl_pct:.2f}%")
             if c4.button("✖", key=f"cl_{p.symbol}"):
-                trading_client.close_position(p.symbol); add_log(f"Manual Close: {p.symbol}"); st.rerun()
+                trading_client.close_position(p.symbol)
+                add_log(f"Manual Close: {p.symbol}"); st.rerun()
+    else:
+        st.info("No active positions.")
 
     # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
         try:
-            df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=100), feed=DataFeed.IEX)).df.reset_index()
+            # Using 5-minute bars for better intraday resolution
+            df = data_client.get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=s, 
+                timeframe=TimeFrame.Minute, 
+                start=datetime.now()-timedelta(days=5), 
+                feed=DataFeed.IEX
+            )).df.reset_index()
+
             ai_conf, conf_hist = get_ai_prediction(df)
             price = float(df['close'].iloc[-1])
+
             s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
-            s1.write(f"**{s}**"); s2.write(f"${price:.2f}"); s3.progress(ai_conf)
-            with s4: st.line_chart(conf_hist, height=50)
+            s1.write(f"**{s}**")
+            s2.write(f"${price:.2f}")
+            s3.progress(ai_conf)
+            with s4: st.line_chart(conf_hist, height=60, use_container_width=True)
 
             def submit_order(is_bot=False):
-                q = round(st.session_state.order_val/price, 2) if st.session_state.order_mode=="USD" else st.session_state.order_val
+                qty = round(st.session_state.order_val/price, 2) if st.session_state.order_mode=="USD" else st.session_state.order_val
                 if not market_open and st.session_state.allow_ext_hours:
-                    req = LimitOrderRequest(symbol=s, qty=q, limit_price=price, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, extended_hours=True)
+                    req = LimitOrderRequest(symbol=s, qty=qty, limit_price=price, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, extended_hours=True)
                 else:
-                    req = MarketOrderRequest(symbol=s, qty=q, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
+                    req = MarketOrderRequest(symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
+
                 trading_client.submit_order(req)
                 add_log(f"{'🤖 Bot' if is_bot else '👤 Manual'} Buy: {s} @ {price}")
 
-            if s5.button("Buy", key=f"b_{s}"): submit_order()
-            if active_now and ai_conf >= st.session_state.ai_threshold: submit_order(is_bot=True)
-        except: continue
+            if s5.button("Buy", key=f"b_{s}"): 
+                submit_order()
 
-    # --- TRADE HISTORY TABLE ---
+            # Bot Auto-execution logic
+            if active_now and ai_conf >= st.session_state.ai_threshold and s not in held_symbols:
+                submit_order(is_bot=True)
+                held_symbols.add(s) # Prevent duplicate orders in the same fragment cycle
+
+        except Exception as e:
+            continue
+
+    # Trade History
     st.divider()
-    st.subheader("📜 Trade History")
-    if st.session_state.logs:
-        # Parsing log strings into a dataframe for visual table
-        history_data = []
-        for line in reversed(st.session_state.logs):
-            if "|" in line:
-                ts, msg = line.split(" | ", 1)
-                history_data.append({"Time": ts, "Activity": msg})
+    with st.expander("📜 Activity Logs & Export", expanded=False):
+        if st.session_state.logs:
+            history_data = [{"Time": l.split(" | ")[0], "Activity": l.split(" | ")[1]} for l in reversed(st.session_state.logs) if " | " in l]
+            st.table(history_data[:15])
+            csv = pd.DataFrame(history_data).to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Export CSV", data=csv, file_name="trade_history.csv", mime="text/csv")
 
-        st.table(history_data[:15]) # Display last 15 actions
-
-        # CSV Export
-        csv = pd.DataFrame(history_data).to_csv(index=False).encode('utf-8')
-        st.download_button(label="📥 Export History (CSV)", data=csv, file_name="trade_history.csv", mime="text/csv")
+    st.caption(f"Last Update: {datetime.now().strftime('%H:%M:%S')} | Data: IEX (Real-time)")
 
 live_ui()
