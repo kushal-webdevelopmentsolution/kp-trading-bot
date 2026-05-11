@@ -152,15 +152,18 @@ def get_ai_prediction(df):
     except Exception as e:
         return 0.5, [0.5]*10
 
-def execute_trade(is_bot=False):
+# Helper for execution (Updated to accept variables)
+def execute_trade(s, price, ai_conf, is_bot=False):
     try:
         qty = int(st.session_state.order_val // price)
-        if qty < 1: return
+        if qty < 1:
+            st.error(f"Order value too low for {s}")
+            return
 
         clock = trading_client.get_clock()
 
         if clock.is_open:
-            # REGULAR HOURS: Use native Trailing Stop
+            # REGULAR MARKET HOURS
             trading_client.submit_order(MarketOrderRequest(
                 symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
             ))
@@ -169,15 +172,15 @@ def execute_trade(is_bot=False):
                 trail_percent=st.session_state.trailing_pct
             ))
         else:
-            # EXTENDED HOURS: Entry must be a Limit Order
+            # EXTENDED HOURS (Limit order required)
             trading_client.submit_order(LimitOrderRequest(
                 symbol=s, qty=qty, limit_price=price, side=OrderSide.BUY, 
                 time_in_force=TimeInForce.DAY, extended_hours=True
             ))
-            add_log(f"Extended Hours Entry: {s}. Virtual Trailing Stop Active.")
 
-        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price}"
-        add_log(msg); st.toast(msg, icon="🚀")
+        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price} | Conf: {ai_conf:.1%}"
+        add_log(msg)
+        st.toast(msg, icon="🚀")
     except Exception as e:
         st.error(f"Trade Failed: {e}")
 
@@ -295,21 +298,24 @@ def live_ui():
             # Order Logic
             # --- MANUAL BUY BUTTON ---
             if s5.button("Buy", key=f"b_{s}"):
-                execute_trade(is_bot=False)
+                # Pass the local variables 's', 'price', and 'ai_conf' into the function
+                execute_trade(s, price, ai_conf, is_bot=False)
                 time.sleep(1) # Brief pause for Alpaca sync
                 # Insert your submit_order() call here
                 st.toast(f"Manual Buy Order Sent for {s}")
                 st.rerun()
 
+
             # --- 3. AUTO-EXECUTION CHECK (The 98% Accuracy Gate) ---
             if active_now and ai_conf >= st.session_state.ai_threshold:
-                # Check held_symbols (defined at start of live_ui) to avoid double buying
                 if s not in held_symbols:
-                    execute_trade(is_bot=True)
+                    # Pass the local variables 's', 'price', and 'ai_conf' into the function
+                    execute_trade(s, price, ai_conf, is_bot=True)
                     st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
                 else:
                     # Subtle indicator that the bot is watching but already owns it
                     st.caption(f"Bot Watching {s} (Position Active)")
+
 
         except Exception as e:
             st.error(f"Error loading {s}: {e}")
