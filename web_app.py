@@ -27,12 +27,6 @@ def load_nltk():
         nltk.download('vader_lexicon')
     return SentimentIntensityAnalyzer()
 
-# Initialize the Analyzer and News Client
-sia = load_nltk()
-news_client = NewsClient(API_KEY, SECRET_KEY)
-
-
-
 # --- 1. CONFIG & CLIENTS ---
 try:
     API_KEY = st.secrets["API_KEY"]
