@@ -8,11 +8,10 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
-from sklearn.ensemble import RandomForestClassifier
+from alpaca.trading.requests import MarketOrderRequest, GetPortfolioHistoryRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 
-# --- CLOUD CONFIG ---
+# --- 1. CONFIG & CLIENTS ---
 try:
     API_KEY = st.secrets["API_KEY"]
     SECRET_KEY = st.secrets["SECRET_KEY"]
@@ -22,119 +21,133 @@ except:
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+st.set_page_config(page_title="AI Trader Pro + Backtest", layout="wide")
 
-st.set_page_config(page_title="AI Trader Cloud Pro", layout="wide")
-
-# --- CORE TRADING FUNCTION ---
-def execute_trade(symbol, qty, price, is_bot=False):
-    try:
-        order_data = MarketOrderRequest(
-            symbol=symbol, 
-            qty=qty, 
-            side=OrderSide.BUY, 
-            time_in_force=TimeInForce.GTC, 
-            order_class=OrderClass.BRACKET, 
-            take_profit=TakeProfitRequest(limit_price=round(price * 1.04, 2)), 
-            stop_loss=StopLossRequest(stop_price=round(price * 0.98, 2))
-        )
-        trading_client.submit_order(order_data)
-        prefix = "🤖 AI" if is_bot else "👤 MANUAL"
-        st.toast(f"{prefix} Order Placed: {symbol}", icon="✅")
-        return f"{prefix} BUY: {symbol} @ {price:.2f} ({qty} units)"
-    except Exception as e:
-        st.error(f"Trade Failed: {str(e)}")
-        return f"❌ ERROR {symbol}: {str(e)}"
-
-# --- PERSISTENCE ---
+# --- 2. INITIALIZATION ---
 SETTINGS_FILE = "settings.json"
 
-def load_settings():
-    defaults = {"tickers": ["SPY", "AMZN", "NVDA", "GOOGL"], "run_bot": False, 
-                "profit_goal": 200.0, "loss_limit": 100.0, "order_mode": "USD", "order_val": 100.0}
+def init_session_state():
+    defaults = {
+        "tickers": ["SPY", "AMZN", "NVDA", "GOOGL"], 
+        "run_bot": False, 
+        "order_mode": "USD", 
+        "order_val": 100.0,
+        "logs": [],
+        "trailing_pct": 0.02,
+        "profit_target": 0.05
+    }
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f:
-                return {**defaults, **json.load(f)}
-        except: return defaults
-    return defaults
+                defaults.update(json.load(f))
+        except: pass
+    for k, v in defaults.items():
+        if k not in st.session_state: st.session_state[k] = v
+
+init_session_state()
 
 def save_settings():
-    settings = {k: st.session_state[k] for k in ["tickers", "run_bot", "profit_goal", "loss_limit", "order_mode", "order_val"]}
+    keys = ["tickers", "run_bot", "order_mode", "order_val", "trailing_pct", "profit_target"]
     with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f)
+        json.dump({k: st.session_state[k] for k in keys}, f)
 
-if "init_loaded" not in st.session_state:
-    saved = load_settings()
-    for k, v in saved.items(): st.session_state[k] = v
-    st.session_state.init_loaded = True
-    st.session_state.logs = []
+# --- 3. SIDEBAR ---
+with st.sidebar:
+    st.header("🛡️ Bot Control")
+    st.session_state.run_bot = st.toggle("Activate AI Bot", value=st.session_state.run_bot, on_change=save_settings)
+    st.session_state.tickers = st.multiselect("Watchlist", st.session_state.tickers, default=st.session_state.tickers, on_change=save_settings)
+    st.divider()
+    st.session_state.order_mode = st.radio("Sizing", ["USD", "Shares"], on_change=save_settings)
+    st.session_state.order_val = st.number_input("Value", value=st.session_state.order_val, on_change=save_settings)
+    st.divider()
+    st.session_state.profit_target = st.slider("Take Profit %", 0.01, 0.15, st.session_state.profit_target, on_change=save_settings)
+    st.session_state.trailing_pct = st.slider("Stop Loss %", 0.01, 0.10, st.session_state.trailing_pct, on_change=save_settings)
 
-# --- SIDEBAR ---
-st.sidebar.header("🛡️ Bot Control")
-st.session_state.run_bot = st.sidebar.toggle("Activate AI Bot", value=st.session_state.run_bot, on_change=save_settings)
-st.session_state.order_mode = st.sidebar.radio("Sizing:", ["Shares", "USD"], index=0 if st.session_state.order_mode == "Shares" else 1, on_change=save_settings)
-st.session_state.order_val = st.sidebar.number_input("Value", value=st.session_state.order_val, on_change=save_settings)
+# --- 4. BACKTESTING ENGINE ---
+def run_backtest(symbol, rsi_buy=35, target=0.05, stop=0.02):
+    req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=365), feed=DataFeed.IEX)
+    df = data_client.get_stock_bars(req).df.reset_index()
+    df['RSI'] = ta.rsi(df['close'], length=14)
 
-if st.sidebar.button("🚨 EMERGENCY SELL ALL", type="primary"):
-    trading_client.close_all_positions(cancel_orders=True)
-    st.rerun()
+    cash = 10000
+    shares = 0
+    history = []
 
-# --- ANALYSIS ENGINE ---
-def scan_ticker(symbol, mode, val):
-    try:
-        end = datetime.now() - timedelta(minutes=20)
-        req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=end-timedelta(days=365), end=end, feed=DataFeed.IEX)
-        df = data_client.get_stock_bars(req).df.reset_index()
-        if df.empty: return {"symbol": symbol, "error": "No Data"}
+    for i in range(len(df)):
+        price = df['close'].iloc[i]
+        rsi = df['RSI'].iloc[i]
 
-        df.ta.rsi(length=14, append=True); df.ta.bbands(length=20, append=True)
-        df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
-        df = df.dropna()
-        cols = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'BBL', 'BBU'])]
-        model = RandomForestClassifier(n_estimators=50).fit(df[cols][:-1], df['target'][:-1])
-        prob = float(model.predict_proba(df[cols].tail(1))[0][1])
-        price = float(df['close'].iloc[-1])
-        qty = float(val if mode == "Shares" else round(val / price, 2))
+        # Sell Logic
+        if shares > 0:
+            pnl = (price - entry_price) / entry_price
+            if pnl >= target or pnl <= -stop:
+                cash = shares * price
+                shares = 0
 
-        return {"symbol": symbol, "price": price, "prob": prob, "df": df, "qty": qty}
-    except Exception as e: return {"symbol": symbol, "error": str(e)}
+        # Buy Logic
+        elif rsi < rsi_buy:
+            shares = cash / price
+            cash = 0
+            entry_price = price
 
-# --- UI DASHBOARD ---
-st.title("🚀 AI Multi-Threaded Cloud Terminal")
+        history.append(cash + (shares * price))
 
-@st.fragment(run_every=60)
-def trading_dashboard():
-    try:
-        acc = trading_client.get_account()
-        st.metric("PORTFOLIO EQUITY", f"${float(acc.equity):,.2f}")
-    except: pass
+    df['Strategy_Equity'] = history
+    df['Buy_Hold'] = (df['close'] / df['close'].iloc[0]) * 10000
+    return df
 
-    st.subheader("⚡ Signal Feed")
-    if st.session_state.tickers:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-            results = list(ex.map(lambda s: scan_ticker(s, st.session_state.order_mode, st.session_state.order_val), st.session_state.tickers))
+# --- 5. UI TABS ---
+tab1, tab2 = st.tabs(["🚀 Live Terminal", "📊 Backtest Strategy"])
 
-        for res in results:
-            if "error" in res: continue
+with tab1:
+    @st.fragment(run_every=60)
+    def live_dashboard():
+        try:
+            hist = trading_client.get_portfolio_history(GetPortfolioHistoryRequest(period="1W", timeframe="1H"))
+            st.area_chart(pd.DataFrame(hist.equity, index=pd.to_datetime(hist.timestamp, unit='s')), height=150)
+        except: pass
 
-            col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
-            col1.write(f"**{res['symbol']}**")
-            col2.write(f"${res['price']:.2f}")
-            col3.progress(res['prob'], text=f"AI: {res['prob']*100:.0f}%")
+        st.subheader("📊 Positions")
+        pos = trading_client.get_all_positions()
+        if pos:
+            cols = st.columns(4)
+            for i, p in enumerate(pos):
+                with cols[i%4]:
+                    st.metric(p.symbol, f"{p.qty}", f"{float(p.unrealized_plpc)*100:.2f}%")
+                    if st.button(f"Close {p.symbol}"): trading_client.close_position(p.symbol); st.rerun()
 
-            # --- EXECUTION LOGIC ---
-            # 1. Bot Execution (Automated)
-            if st.session_state.run_bot and res['prob'] >= 0.90:
-                log_msg = execute_trade(res['symbol'], res['qty'], res['price'], is_bot=True)
-                st.session_state.logs.append(log_msg)
+        st.subheader("⚡ Signals")
+        for s in st.session_state.tickers:
+            try:
+                req = StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=30), feed=DataFeed.IEX)
+                df = data_client.get_stock_bars(req).df.reset_index()
+                df['RSI'] = ta.rsi(df['close'], length=14)
+                price, rsi = df['close'].iloc[-1], df['RSI'].iloc[-1]
 
-            # 2. Manual Execution (Button)
-            if col4.button(f"Buy {res['qty']}", key=f"btn_{res['symbol']}"):
-                log_msg = execute_trade(res['symbol'], res['qty'], res['price'], is_bot=False)
-                st.session_state.logs.append(log_msg)
+                c1, c2, c3, c4 = st.columns([1,1,1,1])
+                c1.write(f"**{s}**")
+                c2.write(f"${price:.2f}")
+                c3.write(f"RSI: {rsi:.1f}")
+                if c4.button(f"Buy", key=f"b_{s}"):
+                    qty = round(st.session_state.order_val / price, 2) if st.session_state.order_mode == "USD" else st.session_state.order_val
+                    trading_client.submit_order(MarketOrderRequest(symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
+                    st.toast(f"Bought {s}")
+            except: continue
+    live_dashboard()
 
-    st.subheader("📜 Recent Activity")
-    for log in reversed(st.session_state.logs[-5:]):
-        st.write(log)
+with tab2:
+    st.header("Strategy Backtester (1-Year)")
+    bt_symbol = st.selectbox("Select Symbol", st.session_state.tickers)
+    if st.button("Run Backtest"):
+        res = run_backtest(bt_symbol, target=st.session_state.profit_target, stop=st.session_state.trailing_pct)
+        st.line_chart(res.set_index('timestamp')[['Strategy_Equity', 'Buy_Hold']])
 
-trading_dashboard()
+        final_return = ((res['Strategy_Equity'].iloc[-1] - 10000) / 10000) * 100
+        bh_return = ((res['Buy_Hold'].iloc[-1] - 10000) / 10000) * 100
+
+        m1, m2 = st.columns(2)
+        m1.metric("Strategy Return", f"{final_return:.2f}%")
+        m2.metric("Buy & Hold Return", f"{bh_return:.2f}%")
+
+st.subheader("📜 Activity Log")
+st.code("\n".join(st.session_state.logs[-5:]))
