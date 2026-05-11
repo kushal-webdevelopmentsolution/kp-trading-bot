@@ -219,38 +219,47 @@ def live_ui():
     # Positions
     st.subheader("📊 Active Positions")
     pos = trading_client.get_all_positions()
+    held_symbols = {p.symbol for p in pos} # Essential for auto-execution check
     if pos:
-        cols = st.columns([1, 1, 1, 0.5])
+        # Loop through positions to handle UI and Virtual Monitoring
         for p in pos:
+            # --- START VIRTUAL MONITORING LOGIC ---
+            # If market is CLOSED, we manually monitor the trailing stop-loss
+            if not clock.is_open:
+                current_price = float(p.current_price)
+                avg_entry = float(p.avg_entry_price)
+
+                # Calculate PnL percentage from entry
+                current_pnl_pct = ((current_price - avg_entry) / avg_entry) * 100
+
+                # If price drops below your trailing threshold (e.g., -2.0%)
+                if current_pnl_pct <= -st.session_state.trailing_pct:
+                    trading_client.submit_order(LimitOrderRequest(
+                        symbol=p.symbol, 
+                        qty=p.qty, 
+                        limit_price=current_price, 
+                        side=OrderSide.SELL, 
+                        time_in_force=TimeInForce.DAY, 
+                        extended_hours=True
+                    ))
+                    add_log(f"🌙 After-Hours Stop Triggered: Sold {p.symbol} at {current_price}")
+            # --- END VIRTUAL MONITORING LOGIC ---
+
+            # --- START EXISTING UI CODE ---
             qty, mkt_val, pnl_pct = float(p.qty), float(p.market_value), float(p.unrealized_plpc) * 100
             c1, c2, c3, c4 = st.columns([1, 1, 1, 0.5])
-            c1.write(f"**{p.symbol}**"); c2.write(f"${mkt_val:,.0f}"); c3.write(f"{pnl_pct:.2f}%")
+            c1.write(f"**{p.symbol}**")
+            c2.write(f"${mkt_val:,.0f}")
+            c3.write(f"{pnl_pct:.2f}%")
+
             if c4.button("✖", key=f"cl_{p.symbol}"):
-                trading_client.close_position(p.symbol); add_log(f"Manual Close: {p.symbol}"); st.rerun()
+                trading_client.close_position(p.symbol)
+                add_log(f"Manual Close: {p.symbol}")
+                st.rerun()
+            # --- END EXISTING UI CODE ---
+    else:
+        st.info("No active positions.")
 
-    clock = trading_client.get_clock()
-    for p in pos:
-    # If market is CLOSED, we manually monitor the trailing stop
-    if not clock.is_open:
-        current_price = float(p.current_price)
-        avg_entry = float(p.avg_entry_price)
-
-        # Calculate how much the price has dropped from entry
-        pnl_pct = (current_price - avg_entry) / avg_entry * 100
-
-        # If price drops below your trailing % threshold
-        if pnl_pct <= -st.session_state.trailing_pct:
-            # Manually liquidate using an Extended Hours Limit Order
-            trading_client.submit_order(LimitOrderRequest(
-                symbol=p.symbol, 
-                qty=p.qty, 
-                limit_price=current_price, 
-                side=OrderSide.SELL, 
-                time_in_force=TimeInForce.DAY, 
-                extended_hours=True
-            ))
-            add_log(f"🌙 Extended Hours Stop-Loss Triggered: Sold {p.symbol} at {current_price}")
-            st.warning(f"Virtual Stop-Loss Triggered for {p.symbol}")
         # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
