@@ -78,98 +78,131 @@ with st.sidebar:
     st.multiselect("Active Watchlist", options=st.session_state.tickers, key="tickers", on_change=save_settings)
 
     st.divider()
-    st.header("🛡️ Strategy Settings")
+    st.header("🏁 Daily Targets")
     st.number_input("Profit Goal ($)", key="global_profit_goal", on_change=save_settings)
     st.number_input("Loss Limit ($)", key="daily_loss_limit", on_change=save_settings)
 
+    st.divider()
+    st.header("🛡️ Strategy")
+    st.slider("Trailing Start %", 0.01, 0.10, key="lock_profit_pct", on_change=save_settings)
+    st.slider("Stop Loss %", 0.01, 0.10, key="trailing_pct", on_change=save_settings)
+
     if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
         trading_client.close_all_positions(cancel_orders=True)
-        add_log("EMERGENCY SHUTDOWN"); st.session_state.run_bot = False; save_settings(); st.rerun()
+        add_log("EMERGENCY SHUTDOWN: All positions closed.")
+        st.session_state.run_bot = False; save_settings(); st.rerun()
 
 # --- 4. ENGINES ---
 def get_market_status():
     try:
         clock = trading_client.get_clock()
-        if clock.is_open:
-            return "OPEN", "green"
-        # Check if currently in pre-market or after-hours
-        now = datetime.now()
-        if (now.hour < 9 or (now.hour == 9 and now.minute < 30)) or (now.hour >= 16):
-            return "EXTENDED", "orange"
-        return "CLOSED", "red"
-    except: return "UNKNOWN", "gray"
+        return {"open": clock.is_open, "timestamp": clock.timestamp}
+    except: return {"open": False, "timestamp": None}
 
-def get_account_details():
+def get_daily_pnl():
     try:
         acc = trading_client.get_account()
-        return float(acc.cash), float(acc.equity), float(acc.last_equity)
-    except: return 0.0, 0.0, 0.0
+        return float(acc.equity) - float(acc.last_equity)
+    except: return 0.0
 
 def get_ai_prediction(df):
     try:
         df = df.copy()
-        df.ta.rsi(append=True); df.ta.macd(append=True)
+        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.002).astype(int)
         df = df.dropna()
-        features = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'MACD'])]
-        model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+        features = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'MACD', 'ADX'])]
+        model = RandomForestClassifier(n_estimators=150, max_depth=10, random_state=42)
         model.fit(df[features][:-10], df['target'][:-10])
-        prob = float(model.predict_proba(df[features].tail(1))[:, 1])
-        return prob, df['RSI_14'].iloc[-1], df['MACDh_12_26_9'].iloc[-1]
-    except: return 0.5, 50.0, 0.0
+        probs = [float(p) for p in model.predict_proba(df[features].tail(10))[:, 1]]
+        return probs[-1], probs
+    except: return 0.5, [0.5]*10
 
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
 @st.fragment(run_every=30)
 def live_ui():
-    cash, equity, last_equity = get_account_details()
-    m_text, m_color = get_market_status()
+    status = get_market_status()
+    market_open = status["open"]
+    daily_pnl = get_daily_pnl()
 
-    # --- Top Row: Portfolio & Market Status ---
-    b1, b2, b3, b4 = st.columns(4)
-    b1.metric("AVAILABLE CASH", f"${cash:,.2f}")
-    b2.metric("PORTFOLIO EQUITY", f"${equity:,.2f}")
+    # Circuit Breakers
+    p_hit = daily_pnl >= st.session_state.global_profit_goal
+    l_hit = daily_pnl <= -abs(st.session_state.daily_loss_limit)
 
-    # Market Status with Color Theme
-    b3.markdown(f"""
-        <div style="background-color:{m_color}; padding:10px; border-radius:10px; text-align:center;">
-            <h3 style="color:white; margin:0;">MARKET {m_text}</h3>
-        </div>
-    """, unsafe_allow_html=True)
+    bot_reason = ""
+    if p_hit and st.session_state.run_bot:
+        bot_reason = "PROFIT GOAL REACHED"
+        trading_client.close_all_positions(cancel_orders=True)
+        st.session_state.run_bot = False; save_settings()
+        add_log(f"🎯 Target Hit: ${daily_pnl:.2f}. Positions closed.")
+    elif l_hit and st.session_state.run_bot:
+        bot_reason = "LOSS LIMIT HIT"
+        st.session_state.run_bot = False; save_settings()
+        add_log(f"🛑 Loss Limit Hit: ${daily_pnl:.2f}. Bot stopped.")
+    elif not market_open and not st.session_state.allow_ext_hours:
+        bot_reason = "MARKET CLOSED"
 
-    daily_pnl = equity - last_equity
-    b4.metric("DAILY PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
+    active_now = st.session_state.run_bot and not bot_reason
 
-    # --- Signals & Technical Factors ---
-    st.subheader("⚡ AI Signal Feed & Technical Factors")
-    h1, h2, h3, h4, h5, h6 = st.columns()
-    h1.caption("SYMBOL"); h2.caption("PRICE"); h3.caption("AI CONF."); h4.caption("RSI"); h5.caption("MACD HIST"); h6.caption("ACTION")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Daily PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
+    m2.metric("Market Status", "OPEN" if market_open else "CLOSED")
+    if bot_reason: m3.error(f"🛑 {bot_reason}")
+    else: m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
 
+    # Positions
+    st.subheader("📊 Active Positions")
+    pos = trading_client.get_all_positions()
+    if pos:
+        cols = st.columns([1, 1, 1, 0.5])
+        for p in pos:
+            qty, mkt_val, pnl_pct = float(p.qty), float(p.market_value), float(p.unrealized_plpc) * 100
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 0.5])
+            c1.write(f"**{p.symbol}**"); c2.write(f"${mkt_val:,.0f}"); c3.write(f"{pnl_pct:.2f}%")
+            if c4.button("✖", key=f"cl_{p.symbol}"):
+                trading_client.close_position(p.symbol); add_log(f"Manual Close: {p.symbol}"); st.rerun()
+
+    # AI Signal Feed
+    st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
         try:
-            df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=60), feed=DataFeed.IEX)).df.reset_index()
-            ai_conf, rsi, macd_h = get_ai_prediction(df)
+            df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=s, timeframe=TimeFrame.Day, start=datetime.now()-timedelta(days=100), feed=DataFeed.IEX)).df.reset_index()
+            ai_conf, conf_hist = get_ai_prediction(df)
             price = float(df['close'].iloc[-1])
+            s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
+            s1.write(f"**{s}**"); s2.write(f"${price:.2f}"); s3.progress(ai_conf)
+            with s4: st.line_chart(conf_hist, height=50)
 
-            c1, c2, c3, c4, c5, c6 = st.columns()
-            c1.write(f"**{s}**")
-            c2.write(f"${price:.2f}")
-            c3.write(f"**{ai_conf*100:.0f}%**")
-            c4.write(f"{rsi:.1f}")
-            c5.write(f"{'📈' if macd_h > 0 else '📉'} {macd_h:.2f}")
+            def submit_order(is_bot=False):
+                q = round(st.session_state.order_val/price, 2) if st.session_state.order_mode=="USD" else st.session_state.order_val
+                if not market_open and st.session_state.allow_ext_hours:
+                    req = LimitOrderRequest(symbol=s, qty=q, limit_price=price, side=OrderSide.BUY, time_in_force=TimeInForce.DAY, extended_hours=True)
+                else:
+                    req = MarketOrderRequest(symbol=s, qty=q, side=OrderSide.BUY, time_in_force=TimeInForce.GTC)
+                trading_client.submit_order(req)
+                add_log(f"{'🤖 Bot' if is_bot else '👤 Manual'} Buy: {s} @ {price}")
 
-            if c6.button("Buy", key=f"b_{s}"):
-                q = round(st.session_state.order_val/price, 2)
-                trading_client.submit_order(MarketOrderRequest(symbol=s, qty=q, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
-                add_log(f"Manual Buy: {s}")
+            if s5.button("Buy", key=f"b_{s}"): submit_order()
+            if active_now and ai_conf >= st.session_state.ai_threshold: submit_order(is_bot=True)
         except: continue
 
-    # --- History ---
+    # --- TRADE HISTORY TABLE ---
     st.divider()
-    st.subheader("📜 Activity Log")
+    st.subheader("📜 Trade History")
     if st.session_state.logs:
-        for log in reversed(st.session_state.logs[-10:]):
-            st.text(log)
+        # Parsing log strings into a dataframe for visual table
+        history_data = []
+        for line in reversed(st.session_state.logs):
+            if "|" in line:
+                ts, msg = line.split(" | ", 1)
+                history_data.append({"Time": ts, "Activity": msg})
+
+        st.table(history_data[:15]) # Display last 15 actions
+
+        # CSV Export
+        csv = pd.DataFrame(history_data).to_csv(index=False).encode('utf-8')
+        st.download_button(label="📥 Export History (CSV)", data=csv, file_name="trade_history.csv", mime="text/csv")
 
 live_ui()
