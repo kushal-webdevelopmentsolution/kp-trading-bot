@@ -17,15 +17,26 @@ from alpaca.data.requests import NewsRequest
 from alpaca.trading.requests import MarketOrderRequest, TrailingStopOrderRequest
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# --- 0. NLTK FIX (Replaces your old block) ---
+# --- 0. NLTK PATH & INITIALIZATION FIX ---
 @st.cache_resource
 def load_nltk():
+    # Explicitly set the path for Streamlit Cloud / appuser environments
+    nltk_path = "/home/appuser/nltk_data"
+    if nltk_path not in nltk.data.path:
+        nltk.data.path.append(nltk_path)
+
     try:
-        # Streamlit-friendly check for the lexicon
+        # Check if lexicon exists in the custom path
         nltk.data.find('sentiment/vader_lexicon.zip')
-    except:
-        nltk.download('vader_lexicon')
+    except (LookupError, Exception):
+        # Force download to the specific appuser directory
+        nltk.download('vader_lexicon', download_dir=nltk_path)
+
     return SentimentIntensityAnalyzer()
+
+# Initialize
+sia = load_nltk()
+
 
 # --- 1. CONFIG & CLIENTS ---
 try:
@@ -36,7 +47,6 @@ except:
     st.stop()
 
 # Initialize the Analyzer and News Client
-sia = load_nltk()
 news_client = NewsClient(API_KEY, SECRET_KEY)
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
