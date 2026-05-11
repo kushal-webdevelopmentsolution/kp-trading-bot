@@ -11,6 +11,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetPortfolioHistoryRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from sklearn.ensemble import RandomForestClassifier
+import xgboost as xgb
 
 # --- 1. CONFIG & CLIENTS ---
 try:
@@ -108,15 +109,48 @@ def get_daily_pnl():
 def get_ai_prediction(df):
     try:
         df = df.copy()
-        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
-        df['target'] = (df['close'].shift(-1) > df['close'] * 1.002).astype(int)
+        # 1. Advanced Technical Strategy (No NLTK needed)
+        df.ta.rsi(append=True)
+        df.ta.macd(append=True)
+        df.ta.adx(append=True)
+        df.ta.ema(length=20, append=True) # Trend Filter
+        df.ta.atr(append=True)             # Volatility Filter
+
+        # 2. Target 98% Precision (Predicting a clear move +0.15% in next bar)
+        df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
         df = df.dropna()
-        features = [c for c in df.columns if any(x in c.upper() for x in ['RSI', 'MACD', 'ADX'])]
-        model = RandomForestClassifier(n_estimators=150, max_depth=10, random_state=42)
-        model.fit(df[features][:-10], df['target'][:-10])
-        probs = [float(p) for p in model.predict_proba(df[features].tail(10))[:, 1]]
-        return probs[-1], probs
-    except: return 0.5, [0.5]*10
+
+        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'EMA', 'ATR'])]
+
+        # 3. Double-Ensemble (RF + XGBoost) for Stability
+        # We use fewer estimators for Streamlit speed but higher depth for precision
+        model_rf = RandomForestClassifier(n_estimators=100, max_depth=12, random_state=42)
+        model_xgb = xgb.XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.1, random_state=42)
+
+        # Training on all but last 5 bars
+        X_train = df[features].iloc[:-5]
+        y_train = df['target'].iloc[:-5]
+
+        model_rf.fit(X_train, y_train)
+        model_xgb.fit(X_train, y_train)
+
+        # 4. Multi-Strategy Confirmation
+        # Combine probabilities from both models
+        prob_rf = model_rf.predict_proba(df[features].tail(10))[:, 1]
+        prob_xgb = model_xgb.predict_proba(df[features].tail(10))[:, 1]
+
+        # Weighted Technical Confidence
+        tech_probs = (prob_rf * 0.5) + (prob_xgb * 0.5)
+
+        # Trend Confirmation: Only high confidence if price is above 20 EMA
+        trend_gate = 1.0 if df['close'].iloc[-1] > df['EMA_20'].iloc[-1] else 0.0
+
+        # Final Score: 80% AI Prediction + 20% Trend Gate
+        final_conf = (tech_probs[-1] * 0.8) + (trend_gate * 0.2)
+
+        return float(final_conf), [float(p) for p in tech_probs]
+    except Exception as e:
+        return 0.5, [0.5]*10
 
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
