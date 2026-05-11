@@ -22,7 +22,7 @@ except:
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-st.set_page_config(page_title="AI Alpha Terminal: Sector Elite", layout="wide")
+st.set_page_config(page_title="AI Alpha Terminal: Ultimate", layout="wide")
 
 # --- 2. PERSISTENCE ENGINE ---
 SETTINGS_FILE = "settings.json"
@@ -140,11 +140,20 @@ def live_ui():
     elif panic: m3.warning("⚠️ VOLATILITY HALT")
     else: m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ BOT STANDBY")
 
+    # --- Equity Curve ---
+    st.subheader("📈 Intra-Day Equity Curve")
+    try:
+        hist = trading_client.get_portfolio_history(GetPortfolioHistoryRequest(period="1D", timeframe="5Min"))
+        hist_df = pd.DataFrame(hist.equity, index=pd.to_datetime(hist.timestamp, unit='s'), columns=['Equity'])
+        st.area_chart(hist_df, height=200)
+    except: st.info("Loading intra-day portfolio history...")
+
     st.subheader("📊 Positions")
     pos = trading_client.get_all_positions()
     if pos:
         cols = st.columns([1, 1, 1, 1, 1, 1, 0.5])
-        for col, head in zip(cols, ["SYMBOL", "AMOUNT", "P/L %", "STOP TYPE", "STOP PRICE", "DIST", "EXIT"]): col.caption(head)
+        heads = ["SYMBOL", "AMOUNT", "P/L %", "STOP TYPE", "STOP PRICE", "DIST", "EXIT"]
+        for col, head in zip(cols, heads): col.caption(head)
         for p in pos:
             qty, mkt_val, curr_price = float(p.qty), float(p.market_value), float(p.current_price)
             avg_entry, pnl_pct = float(p.avg_entry_price), float(p.unrealized_plpc) * 100
@@ -189,7 +198,6 @@ def live_ui():
         st.subheader("🕸️ Sector Correlation Matrix")
         corr_df = pd.concat(prices_for_corr.values(), axis=1, keys=prices_for_corr.keys()).corr()
         st.dataframe(corr_df.style.background_gradient(cmap='RdYlGn_r', axis=None), use_container_width=True)
-        st.caption("Lower correlation (red) suggests better diversification.")
 
     st.divider()
     st.subheader("📜 Trade History")
