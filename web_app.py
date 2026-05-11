@@ -152,6 +152,30 @@ def get_ai_prediction(df):
     except Exception as e:
         return 0.5, [0.5]*10
 
+# Helper for execution (handles both Manual and Bot)
+def execute_trade(is_bot=False):
+    try:
+        qty = int(st.session_state.order_val // price)
+        if qty < 1:
+            st.error(f"Order value too low for {s}")
+            return
+
+            # 1. Entry Market Buy
+            trading_client.submit_order(MarketOrderRequest(
+                symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
+            ))
+
+            # 2. Dynamic Trailing Stop (Lifts automatically with price)
+            trading_client.submit_order(TrailingStopOrderRequest(
+                symbol=s, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,trail_percent=st.session_state.trailing_pct
+            ))
+
+            msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price} | Conf: {ai_conf:.1%}"
+            add_log(msg)
+            st.toast(msg, icon="🚀")
+    except Exception as e:
+        st.error(f"Trade Failed: {e}")
+
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
@@ -230,14 +254,23 @@ def live_ui():
                 st.line_chart(conf_hist, height=60, use_container_width=True)
 
             # Order Logic
+            # --- MANUAL BUY BUTTON ---
             if s5.button("Buy", key=f"b_{s}"):
+                execute_trade(is_bot=False)
+                time.sleep(1) # Brief pause for Alpaca sync
                 # Insert your submit_order() call here
                 st.toast(f"Manual Buy Order Sent for {s}")
+                st.rerun()
 
-            # 3. AUTO-EXECUTION CHECK
+            # --- 3. AUTO-EXECUTION CHECK (The 98% Accuracy Gate) ---
             if active_now and ai_conf >= st.session_state.ai_threshold:
-                # Add logic to check if already holding s to avoid double buying
-                st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
+                # Check held_symbols (defined at start of live_ui) to avoid double buying
+                if s not in held_symbols:
+                    execute_trade(is_bot=True)
+                    st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
+                else:
+                    # Subtle indicator that the bot is watching but already owns it
+                    st.caption(f"Bot Watching {s} (Position Active)")
 
         except Exception as e:
             st.error(f"Error loading {s}: {e}")
