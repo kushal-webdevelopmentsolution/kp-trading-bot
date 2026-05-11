@@ -61,7 +61,7 @@ def add_log(msg):
 
 def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA"], "run_bot": False, "order_mode": "USD", 
-                "order_val": 100.0, "trailing_pct": 0.02, "profit_target": 0.05, 
+                "order_val": 100.0, "trailing_pct": 0.5, "profit_target": 0.05, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.03,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
     if os.path.exists(SETTINGS_FILE):
