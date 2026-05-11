@@ -41,6 +41,10 @@ except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
 
+# Initialize the Analyzer and News Client
+sia = load_nltk()
+news_client = NewsClient(API_KEY, SECRET_KEY)
+
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
