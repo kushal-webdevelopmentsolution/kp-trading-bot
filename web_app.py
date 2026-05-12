@@ -277,7 +277,7 @@ def live_ui():
                     trading_client.submit_order(LimitOrderRequest(
                         symbol=p.symbol, 
                         qty=p.qty, 
-                        limit_price=current_price, 
+                        limit_price=round(float(current_price), 2), 
                         side=OrderSide.SELL, 
                         time_in_force=TimeInForce.DAY, 
                         extended_hours=True
@@ -362,7 +362,7 @@ def live_ui():
                 elif is_pending:
                     st.warning(f"Cannot Buy: An order for {s} is already pending.")
                 else:
-                    execute_trade(s, price, ai_conf, is_bot=False)
+                    execute_trade(s, round(float(price), 2), ai_conf, is_bot=False)
                     st.toast(f"👤 Manual Order Sent: {s}", icon="📥")
                     time.sleep(1)
                     st.rerun()
@@ -370,7 +370,7 @@ def live_ui():
             # --- 3. AUTO-EXECUTION CHECK (The 98% Accuracy Gate) ---
             if active_now and ai_conf >= st.session_state.ai_threshold:
                 if not is_held and not is_pending:
-                    execute_trade(s, price, ai_conf, is_bot=True)
+                    execute_trade(s, round(float(price), 2), ai_conf, is_bot=True)
                     st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
                 elif is_pending:
                     st.caption(f"⏳ Bot skipping {s}: Order already in flight.")
