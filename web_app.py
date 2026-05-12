@@ -17,8 +17,8 @@ from alpaca.trading.enums import QueryOrderStatus
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY = st.secrets["API_KEY"]
-    SECRET_KEY = st.secrets["SECRET_KEY"]
+    API_KEY = "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
+    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -30,6 +30,10 @@ st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
 # --- 2. PERSISTENCE ENGINE ---
 SETTINGS_FILE = "settings.json"
 LOG_FILE = "trade_history.log"
+
+if "model_vault" not in st.session_state:
+    st.session_state.model_vault = {}
+
 
 def save_settings():
     keys = ["tickers", "run_bot", "order_mode", "order_val", "trailing_pct", 
@@ -119,97 +123,68 @@ def get_daily_pnl():
         return float(acc.equity) - float(acc.last_equity)
     except: return 0.0
 
-if "live_brains" not in st.session_state:
-    st.session_state.live_brains = {}
-
 def get_ai_prediction(df, symbol):
-    # Standard Fallbacks
+    # FALLBACKS
     neutral_conf = 0.5
     neutral_hist = [0.5] * 10
     neutral_map = {}
 
     try:
-        # DATA VALIDATION
-        if df is None or len(df) < 60:
+        # --- 1. DATA VALIDATION ---
+        if df is None or len(df) < 50:
             return neutral_conf, neutral_hist, neutral_map
 
         df = df.copy()
-        # Clean and calculate technical suite
+        # Fast Indicators
         df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
-        df.ta.bbands(append=True); df.ta.vwap(append=True); df.ta.atr(append=True)
+        df.ta.ema(length=20, append=True); df.ta.atr(append=True)
 
-        # Normalized Volume-Price Trend (Z-Score)
-        vpt_raw = ta.vpt(df['close'], df['volume'])
-        df['vpt'] = (vpt_raw - vpt_raw.rolling(30).mean()) / (vpt_raw.rolling(30).std() + 1e-9)
-        df['vpt_ema'] = ta.ema(df['vpt'], length=10)
-
-        # Momentum vs Trend Filter
-        df['self_rs'] = df['close'] / (ta.ema(df['close'], length=50) + 1e-9)
-
-        # Precision Target (0.15% gain in next bar)
+        # High-Precision Target (0.15% move)
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
-        df = df.dropna()
+        df = df.ffill().dropna()
 
-        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'BBP', 'VWAP', 'vpt', 'self_rs', 'ATR'])]
+        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'EMA', 'ATR'])]
 
-        # --- SMART ENSEMBLE TRAINING ---
+        # --- 2. LIGHTWEIGHT TRAINING (Every 1 Hour) ---
         now = time.time()
-        brain_data = st.session_state.live_brains.get(symbol, {"time": 0})
+        brain = st.session_state.model_vault.get(symbol, {"time": 0})
 
-        # Training Logic (Triggered every 1 hour)
-        if (now - brain_data["time"]) > 3600:
-            # We use st.status here so you see the activity in the UI
-            with st.status(f"🧠 AI STUDYING: {symbol} (30D Patterns)", expanded=False) as status:
-                st.write("Fetching historical deep-data...")
-                # Training on 30 Days of Minute Data
-                train_bars = data_client.get_stock_bars(StockBarsRequest(
-                    symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, 
-                    start=datetime.now()-timedelta(days=30), feed=DataFeed.IEX
-                )).df.reset_index()
+        if (now - brain["time"]) > 3600:
+            # Multi-core training for speed
+            m_rf = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=-1, random_state=42)
+            m_xgb = xgb.XGBClassifier(n_estimators=100, max_depth=6, tree_method='hist', n_jobs=-1)
 
-                st.write("Calculating multi-strategy confluence...")
-                train_bars.ta.rsi(append=True); train_bars.ta.macd(append=True)
-                train_bars.ta.adx(append=True); train_bars.ta.bbands(append=True)
-                train_bars.ta.vwap(append=True); train_bars.ta.atr(append=True)
-                v_raw = ta.vpt(train_bars['close'], train_bars['volume'])
-                train_bars['vpt'] = (v_raw - v_raw.rolling(30).mean()) / (v_raw.rolling(30).std() + 1e-9)
-                train_bars['self_rs'] = train_bars['close'] / (ta.ema(train_bars['close'], length=50) + 1e-9)
-                train_bars['target'] = (train_df['close'].shift(-1) > train_df['close'] * 1.0015).astype(int)
-                train_df = train_bars.dropna()
+            # Use a smaller slice for training to stay light
+            train_data = df.iloc[-500:] if len(df) > 500 else df
+            X, y = train_data[features].iloc[:-2], train_data['target'].iloc[:-2]
 
-                st.write("Optimizing Ensemble (RF + XGBoost)...")
-                m_rf = RandomForestClassifier(n_estimators=150, max_depth=10, n_jobs=-1, random_state=42)
-                m_xgb = xgb.XGBClassifier(n_estimators=150, max_depth=6, tree_method='hist', n_jobs=-1)
+            m_rf.fit(X, y); m_xgb.fit(X, y)
 
-                X, y = train_df[features], train_df['target']
-                m_rf.fit(X, y); m_xgb.fit(X, y)
+            # Save trained models to RAM
+            st.session_state.model_vault[symbol] = {
+                "models": (m_rf, m_xgb), 
+                "time": now,
+                "importance": dict(zip(features, m_rf.feature_importances_))
+            }
+            # Optional: st.toast(f"🧠 {symbol} Brain Re-Optimized")
 
-                st.session_state.live_brains[symbol] = {
-                    "models": (m_rf, m_xgb), 
-                    "time": now,
-                    "features": features,
-                    "importance": dict(zip(features, m_rf.feature_importances_))
-                }
-                status.update(label=f"✅ {symbol} Brain Optimized!", state="complete")
+        # --- 3. INSTANT INFERENCE (Every Refresh) ---
+        # This part takes 0.001 seconds
+        active_brain = st.session_state.model_vault[symbol]
+        rf_m, xgb_m = active_brain["models"]
 
-        # --- INSTANT INFERENCE ---
-        stored = st.session_state.live_brains[symbol]
-        m_rf, m_xgb = stored["models"]
-
-        # Predict on fresh data
-        last_data = df[features].tail(10)
-        p_rf = m_rf.predict_proba(last_data)[:, 1]
-        p_xgb = m_xgb.predict_proba(last_data)[:, 1]
+        # Predict on latest row only
+        last_row = df[features].tail(10)
+        p_rf = rf_m.predict_proba(last_row)[:, 1]
+        p_xgb = xgb_m.predict_proba(last_row)[:, 1]
         tech_probs = (p_rf + p_xgb) / 2
 
-        # Precision Gates
-        vpt_gate = 1.0 if df['vpt'].iloc[-1] > df['vpt_ema'].iloc[-1] else 0.5
-        vwap_gate = 1.0 if df['close'].iloc[-1] > df['VWAP_D'].iloc[-1] else 0.0
+        # Confirmation Gate
+        trend_gate = 1.0 if df['close'].iloc[-1] > df['EMA_20'].iloc[-1] else 0.0
+        final_conf = (tech_probs[-1] * 0.8) + (trend_gate * 0.2)
 
-        # 80% Technical Model + 20% Hard Gates
-        final_conf = (tech_probs[-1] * 0.8) + (vpt_gate * 0.1) + (vwap_gate * 0.1)
-
-        return float(final_conf), [float(p) for p in tech_probs], stored["importance"]
+        # Return Conf, History, and Feature Importance
+        return float(final_conf), [float(p) for p in tech_probs], active_brain["importance"]
 
     except Exception as e:
         return neutral_conf, neutral_hist, neutral_map
@@ -273,8 +248,24 @@ def execute_trade(s, price, ai_conf, is_bot=False):
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
-@st.fragment(run_every=30)
+@st.fragment(run_every=60)
 def live_ui():
+    now_dt = datetime.now()
+    last_refresh = now_dt.strftime("%I:%M:%S %p")
+    next_refresh_dt = now_dt + timedelta(seconds=60)
+    next_refresh = next_refresh_dt.strftime("%I:%M:%S %p")
+
+    # 2. Display Timing UI
+    t1, t2 = st.columns([2, 1])
+    with t1:
+        st.caption(f"🕒 Last Refresh: **{last_refresh}**")
+    with t2:
+        st.caption(f"⏭️ Next Update: **{next_refresh}**")
+
+    # Optional: Visual progress bar for the 60s loop
+    # Note: This bar resets to 0% every time the fragment reruns
+    st.progress(0, text="Engine Cycle active (60s timer)")
+
     status = get_market_status()
     market_open = status["open"]
     daily_pnl = get_daily_pnl()
@@ -359,15 +350,6 @@ def live_ui():
     except:
         pending_counts = {}
 
-    # --- TOP OF live_ui() ---
-    with st.container(border=True):
-        c1, c2 = st.columns([1, 4])
-        c1.markdown("#### 🤖 Bot Pulse")
-        if st.session_state.run_bot:
-            c2.caption(f"Last Full System Scan: {datetime.now().strftime('%H:%M:%S')}")
-            # Optional: Show which models are currently "Warm" (in memory)
-            warm_models = ", ".join(st.session_state.live_brains.keys())
-            c2.write(f"**Warm Brains:** {warm_models if warm_models else 'None (Initializing...)'}")
         # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
@@ -376,13 +358,11 @@ def live_ui():
             df = data_client.get_stock_bars(StockBarsRequest(
                 symbol_or_symbols=s, 
                 timeframe=TimeFrame.Day, 
-                start=datetime.now()-timedelta(days=100), 
+                start=datetime.now()-timedelta(days=365), 
                 feed=DataFeed.IEX
             )).df.reset_index()
 
-            ai_conf, conf_hist, feat_map = get_ai_prediction(df,s)
-            # Inside your ticker loop in live_ui()
-            #ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
+            ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
             price = float(df['close'].iloc[-1])
 
             # Layout columns
@@ -479,18 +459,9 @@ def live_ui():
         csv = pd.DataFrame(history_data).to_csv(index=False).encode('utf-8')
         st.download_button(label="📥 Export History (CSV)", data=csv, file_name="trade_history.csv", mime="text/csv")
     st.divider()
-    with st.expander(f"🔍 AI Logic Breakdown: {s}"):
+    # Add this right after the progress bar in your loop
+    with st.expander(f"🔍 Why {s}?"):
         if feat_map:
-            # Convert to DataFrame for easy charting
-            feat_df = pd.DataFrame(list(feat_map.items()), columns=['Factor', 'Weight'])
-            feat_df = feat_df.sort_values(by='Weight', ascending=True)
-
-            # Display as a horizontal bar chart
-            st.bar_chart(feat_df.set_index('Factor'), horizontal=True, height=200)
-
-            # Quick Insight Text
-            top_factor = feat_df.iloc[-1]['Factor']
-            st.caption(f"Bot is currently prioritizing **{top_factor}** for {s} entries.")
-        else:
-            st.caption("Training data pending...")
+            f_df = pd.DataFrame(list(feat_map.items()), columns=['Factor', 'Weight']).sort_values('Weight')
+            st.bar_chart(f_df.set_index('Factor'), horizontal=True, height=200)
 live_ui()
