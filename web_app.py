@@ -123,79 +123,96 @@ if "live_brains" not in st.session_state:
     st.session_state.live_brains = {}
 
 def get_ai_prediction(df, symbol):
+    # Standard Fallbacks
+    neutral_conf = 0.5
+    neutral_hist = [0.5] * 10
+    neutral_map = {}
+
     try:
-        # --- 1. LOCAL DATA PREP & INDICATORS ---
+        # DATA VALIDATION
+        if df is None or len(df) < 60:
+            return neutral_conf, neutral_hist, neutral_map
+
         df = df.copy()
+        # Clean and calculate technical suite
         df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
         df.ta.bbands(append=True); df.ta.vwap(append=True); df.ta.atr(append=True)
 
         # Normalized Volume-Price Trend (Z-Score)
         vpt_raw = ta.vpt(df['close'], df['volume'])
-        df['vpt'] = (vpt_raw - vpt_raw.rolling(20).mean()) / (vpt_raw.rolling(20).std() + 1e-9)
+        df['vpt'] = (vpt_raw - vpt_raw.rolling(30).mean()) / (vpt_raw.rolling(30).std() + 1e-9)
         df['vpt_ema'] = ta.ema(df['vpt'], length=10)
 
-        # Self-Relative Strength (Price vs 50 EMA)
+        # Momentum vs Trend Filter
         df['self_rs'] = df['close'] / (ta.ema(df['close'], length=50) + 1e-9)
 
-        # Define high-accuracy prediction target (0.15% gain)
+        # Precision Target (0.15% gain in next bar)
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
         df = df.dropna()
 
-        # Identify features for the models
-        features = [c for c in df.columns if any(x in c for x in 
-                   ['RSI', 'MACD', 'ADX', 'BBP', 'VWAP', 'vpt', 'self_rs', 'ATR'])]
+        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'BBP', 'VWAP', 'vpt', 'self_rs', 'ATR'])]
 
-        # --- 2. SMART CACHED TRAINING ---
-        import xgboost as xgb
-        from sklearn.ensemble import RandomForestClassifier
-
+        # --- SMART ENSEMBLE TRAINING ---
         now = time.time()
-        if "live_brains" not in st.session_state: st.session_state.live_brains = {}
         brain_data = st.session_state.live_brains.get(symbol, {"time": 0})
 
-        # Retrain every 1 hour (3600s)
+        # Training Logic (Triggered every 1 hour)
         if (now - brain_data["time"]) > 3600:
-            # Parallel training for speed
-            m_rf = RandomForestClassifier(n_estimators=150, max_depth=10, n_jobs=-1, random_state=42)
-            m_xgb = xgb.XGBClassifier(n_estimators=150, max_depth=6, tree_method='hist', n_jobs=-1)
+            # We use st.status here so you see the activity in the UI
+            with st.status(f"🧠 AI STUDYING: {symbol} (30D Patterns)", expanded=False) as status:
+                st.write("Fetching historical deep-data...")
+                # Training on 30 Days of Minute Data
+                train_bars = data_client.get_stock_bars(StockBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, 
+                    start=datetime.now()-timedelta(days=30), feed=DataFeed.IEX
+                )).df.reset_index()
 
-            X_train, y_train = df[features].iloc[:-5], df['target'].iloc[:-5]
-            m_rf.fit(X_train, y_train)
-            m_xgb.fit(X_train, y_train)
+                st.write("Calculating multi-strategy confluence...")
+                train_bars.ta.rsi(append=True); train_bars.ta.macd(append=True)
+                train_bars.ta.adx(append=True); train_bars.ta.bbands(append=True)
+                train_bars.ta.vwap(append=True); train_bars.ta.atr(append=True)
+                v_raw = ta.vpt(train_bars['close'], train_bars['volume'])
+                train_bars['vpt'] = (v_raw - v_raw.rolling(30).mean()) / (v_raw.rolling(30).std() + 1e-9)
+                train_bars['self_rs'] = train_bars['close'] / (ta.ema(train_bars['close'], length=50) + 1e-9)
+                train_bars['target'] = (train_df['close'].shift(-1) > train_df['close'] * 1.0015).astype(int)
+                train_df = train_bars.dropna()
 
-            st.session_state.live_brains[symbol] = {
-                "models": (m_rf, m_xgb), 
-                "time": now,
-                "features": features
-            }
+                st.write("Optimizing Ensemble (RF + XGBoost)...")
+                m_rf = RandomForestClassifier(n_estimators=150, max_depth=10, n_jobs=-1, random_state=42)
+                m_xgb = xgb.XGBClassifier(n_estimators=150, max_depth=6, tree_method='hist', n_jobs=-1)
 
-        # --- 3. INFERENCE & FEATURE MAP EXTRACTION ---
+                X, y = train_df[features], train_df['target']
+                m_rf.fit(X, y); m_xgb.fit(X, y)
+
+                st.session_state.live_brains[symbol] = {
+                    "models": (m_rf, m_xgb), 
+                    "time": now,
+                    "features": features,
+                    "importance": dict(zip(features, m_rf.feature_importances_))
+                }
+                status.update(label=f"✅ {symbol} Brain Optimized!", state="complete")
+
+        # --- INSTANT INFERENCE ---
         stored = st.session_state.live_brains[symbol]
         m_rf, m_xgb = stored["models"]
 
-        # Extract 'Logic Map' from Random Forest
-        importances = m_rf.feature_importances_
-        feature_map = dict(zip(features, importances))
+        # Predict on fresh data
+        last_data = df[features].tail(10)
+        p_rf = m_rf.predict_proba(last_data)[:, 1]
+        p_xgb = m_xgb.predict_proba(last_data)[:, 1]
+        tech_probs = (p_rf + p_xgb) / 2
 
-        # Predict probability trend (last 10 bars)
-        last_rows = df[features].tail(10)
-        p_rf = m_rf.predict_proba(last_rows)[:, 1]
-        p_xgb = m_xgb.predict_proba(last_rows)[:, 1]
-        probs = (p_rf + p_xgb) / 2
-
-        # HARD GATES (Sanity Checks)
+        # Precision Gates
         vpt_gate = 1.0 if df['vpt'].iloc[-1] > df['vpt_ema'].iloc[-1] else 0.5
         vwap_gate = 1.0 if df['close'].iloc[-1] > df['VWAP_D'].iloc[-1] else 0.0
 
-        # Final Weighted Confidence (70% AI + 30% Hard Gates)
-        final_conf = (probs[-1] * 0.7) + (vpt_gate * 0.15) + (vwap_gate * 0.15)
-        final_conf = max(0.0, min(1.0, float(final_conf)))
+        # 80% Technical Model + 20% Hard Gates
+        final_conf = (tech_probs[-1] * 0.8) + (vpt_gate * 0.1) + (vwap_gate * 0.1)
 
-        return final_conf, [float(p) for p in probs], feature_map
+        return float(final_conf), [float(p) for p in tech_probs], stored["importance"]
 
     except Exception as e:
-        return 0.5, [0.5]*10, {}
-
+        return neutral_conf, neutral_hist, neutral_map
 
 # Helper for execution (Supports USD/Shares toggle, Extended Hours, and Duplicate Protection)
 def execute_trade(s, price, ai_conf, is_bot=False):
@@ -342,6 +359,15 @@ def live_ui():
     except:
         pending_counts = {}
 
+    # --- TOP OF live_ui() ---
+    with st.container(border=True):
+        c1, c2 = st.columns([1, 4])
+        c1.markdown("#### 🤖 Bot Pulse")
+        if st.session_state.run_bot:
+            c2.caption(f"Last Full System Scan: {datetime.now().strftime('%H:%M:%S')}")
+            # Optional: Show which models are currently "Warm" (in memory)
+            warm_models = ", ".join(st.session_state.live_brains.keys())
+            c2.write(f"**Warm Brains:** {warm_models if warm_models else 'None (Initializing...)'}")
         # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
