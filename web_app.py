@@ -81,7 +81,7 @@ with st.sidebar:
     st.header("🤖 Bot Control")
     st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings)
     st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings)
-    st.slider("AI Trigger Threshold", 0.70, 0.98, key="ai_threshold", on_change=save_settings)
+    st.slider("AI Trigger Threshold", 0.50, 0.98, key="ai_threshold", on_change=save_settings)
 
     st.divider()
     st.header("📂 Watchlist")
