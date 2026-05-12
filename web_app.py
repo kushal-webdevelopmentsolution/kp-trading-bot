@@ -322,7 +322,7 @@ def live_ui():
                 feed=DataFeed.IEX
             )).df.reset_index()
 
-            ai_conf, conf_hist = get_ai_prediction(df)
+            ai_conf, conf_hist = get_ai_prediction(df,s)
             price = float(df['close'].iloc[-1])
 
             # Layout columns
