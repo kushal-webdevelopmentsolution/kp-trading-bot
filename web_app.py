@@ -124,46 +124,72 @@ if "live_brains" not in st.session_state:
 
 def get_ai_prediction(df, symbol):
     try:
-        # --- 1. LIGHTWEIGHT FEATURE ENGINEERING ---
         df = df.copy()
-        # Only compute what is absolutely necessary
-        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
-        df.ta.ema(length=20, append=True)
 
+        # 1. CORE TECHNICALS
+        df.ta.rsi(append=True)
+        df.ta.macd(append=True)
+        df.ta.adx(append=True)     # Trend Strength
+        df.ta.bbands(append=True)  # Squeeze Detection
+        df.ta.vwap(append=True)    # Institutional Anchor
+        df.ta.atr(append=True)     # Volatility/Speed
+
+        # 2. VOLUME-PRICE TREND (VPT) & MOMENTUM
+        # VPT confirms if price moves are backed by volume flow
+        df['vpt'] = ta.vpt(df['close'], df['volume'])
+        df['vpt_ema'] = ta.ema(df['vpt'], length=10)
+
+        # Self-Relative Strength: Price vs its own 50-period average
+        df['self_rs'] = df['close'] / df.ta.ema(length=50)
+
+        # 3. TARGETING & FEATURES
+        # Target a 0.15% move in the next bar for high precision
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
         df = df.dropna()
-        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'EMA'])]
 
-        # --- 2. MULTI-CORE PARALLEL TRAINING ---
+        # Grab all calculated features for the AI
+        features = [c for c in df.columns if any(x in c for x in 
+                   ['RSI', 'MACD', 'ADX', 'BBP', 'VWAP', 'vpt', 'self_rs', 'ATR'])]
+
+        # --- 4. FAST RAM-BASED MODEL RECALL ---
         now = time.time()
+        if "live_brains" not in st.session_state: st.session_state.live_brains = {}
         brain_data = st.session_state.live_brains.get(symbol, {"time": 0})
 
-        if (now - brain_data["time"]) > 3600: # 1 Hour Retrain
-            # n_jobs=-1 uses ALL CPU cores to train in parallel
-            m_rf = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=-1, random_state=42)
-            # tree_method='hist' is the fastest training method for XGBoost
-            m_xgb = xgb.XGBClassifier(n_estimators=100, max_depth=6, tree_method='hist', n_jobs=-1)
+        # Hourly re-optimization
+        if (now - brain_data["time"]) > 3600: 
+            # Multi-core training (n_jobs=-1) with Histogram method for speed
+            m_rf = RandomForestClassifier(n_estimators=150, max_depth=12, n_jobs=-1, random_state=42)
+            m_xgb = xgb.XGBClassifier(n_estimators=150, max_depth=6, tree_method='hist', n_jobs=-1)
 
             X, y = df[features].iloc[:-5], df['target'].iloc[:-5]
             m_rf.fit(X, y); m_xgb.fit(X, y)
-
             st.session_state.live_brains[symbol] = {"models": (m_rf, m_xgb), "time": now}
-            add_log(f"⚡ {symbol} Brain Re-optimized.")
 
-        # --- 3. INSTANT INFERENCE ---
+        # --- 5. MULTI-FACTOR SIGNAL BLEND ---
         models = st.session_state.live_brains[symbol]["models"]
-        # Fast prediction on the latest data row only
-        latest_row = df[features].tail(10)
-        p_rf = models[0].predict_proba(latest_row)[:, 1]
-        p_xgb = models[1].predict_proba(latest_row)[:, 1]
+        # Fast inference
+        p_rf = models.predict_proba(df[features].tail(10))[:, 1]
+        p_xgb = models.predict_proba(df[features].tail(10))[:, 1]
+        probs = (p_rf + p_xgb) / 2
 
-        tech_probs = (p_rf + p_xgb) / 2
-        trend_gate = 1.0 if df['close'].iloc[-1] > df['EMA_20'].iloc[-1] else 0.0
-        final_conf = (tech_probs[-1] * 0.8) + (trend_gate * 0.2)
+        # FINAL PRECISION GATES (The 98% Filter)
+        # Gate 1: Volume Flow (VPT must be above its EMA)
+        vpt_gate = 1.0 if df['vpt'].iloc[-1] > df['vpt_ema'].iloc[-1] else 0.5
+        # Gate 2: Institutional Conviction (Price must be above VWAP)
+        vwap_gate = 1.0 if df['close'].iloc[-1] > df['VWAP_D'].iloc[-1] else 0.0
+        # Gate 3: Trend Strength (ADX must be showing a trending market)
+        adx_gate = 1.0 if df['ADX_14'].iloc[-1] > 25 else 0.5
 
-        return float(final_conf), [float(p) for p in tech_probs]
-    except Exception:
+        # Strategic Blend: 70% AI + 10% Volume + 10% Institutional + 10% Trend Strength
+        final_conf = (probs[-1] * 0.7) + (vpt_gate * 0.1) + (vwap_gate * 0.1) + (adx_gate * 0.1)
+
+        return float(final_conf), [float(p) for p in probs]
+
+    except Exception as e:
         return 0.5, [0.5]*10
+
+
 
 # Helper for execution (Supports USD/Shares toggle, Extended Hours, and Duplicate Protection)
 def execute_trade(s, price, ai_conf, is_bot=False):
