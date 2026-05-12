@@ -124,71 +124,77 @@ if "live_brains" not in st.session_state:
 
 def get_ai_prediction(df, symbol):
     try:
+        # --- 1. LOCAL DATA PREP & INDICATORS ---
         df = df.copy()
+        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
+        df.ta.bbands(append=True); df.ta.vwap(append=True); df.ta.atr(append=True)
 
-        # 1. CORE TECHNICALS
-        df.ta.rsi(append=True)
-        df.ta.macd(append=True)
-        df.ta.adx(append=True)     # Trend Strength
-        df.ta.bbands(append=True)  # Squeeze Detection
-        df.ta.vwap(append=True)    # Institutional Anchor
-        df.ta.atr(append=True)     # Volatility/Speed
-
-        # 2. VOLUME-PRICE TREND (VPT) & MOMENTUM
-        # VPT confirms if price moves are backed by volume flow
-        df['vpt'] = ta.vpt(df['close'], df['volume'])
+        # Normalized Volume-Price Trend (Z-Score)
+        vpt_raw = ta.vpt(df['close'], df['volume'])
+        df['vpt'] = (vpt_raw - vpt_raw.rolling(20).mean()) / (vpt_raw.rolling(20).std() + 1e-9)
         df['vpt_ema'] = ta.ema(df['vpt'], length=10)
 
-        # Self-Relative Strength: Price vs its own 50-period average
-        df['self_rs'] = df['close'] / df.ta.ema(length=50)
+        # Self-Relative Strength (Price vs 50 EMA)
+        df['self_rs'] = df['close'] / (ta.ema(df['close'], length=50) + 1e-9)
 
-        # 3. TARGETING & FEATURES
-        # Target a 0.15% move in the next bar for high precision
+        # Define high-accuracy prediction target (0.15% gain)
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
         df = df.dropna()
 
-        # Grab all calculated features for the AI
+        # Identify features for the models
         features = [c for c in df.columns if any(x in c for x in 
                    ['RSI', 'MACD', 'ADX', 'BBP', 'VWAP', 'vpt', 'self_rs', 'ATR'])]
 
-        # --- 4. FAST RAM-BASED MODEL RECALL ---
+        # --- 2. SMART CACHED TRAINING ---
+        import xgboost as xgb
+        from sklearn.ensemble import RandomForestClassifier
+
         now = time.time()
         if "live_brains" not in st.session_state: st.session_state.live_brains = {}
         brain_data = st.session_state.live_brains.get(symbol, {"time": 0})
 
-        # Hourly re-optimization
-        if (now - brain_data["time"]) > 3600: 
-            # Multi-core training (n_jobs=-1) with Histogram method for speed
-            m_rf = RandomForestClassifier(n_estimators=150, max_depth=12, n_jobs=-1, random_state=42)
+        # Retrain every 1 hour (3600s)
+        if (now - brain_data["time"]) > 3600:
+            # Parallel training for speed
+            m_rf = RandomForestClassifier(n_estimators=150, max_depth=10, n_jobs=-1, random_state=42)
             m_xgb = xgb.XGBClassifier(n_estimators=150, max_depth=6, tree_method='hist', n_jobs=-1)
 
-            X, y = df[features].iloc[:-5], df['target'].iloc[:-5]
-            m_rf.fit(X, y); m_xgb.fit(X, y)
-            st.session_state.live_brains[symbol] = {"models": (m_rf, m_xgb), "time": now}
+            X_train, y_train = df[features].iloc[:-5], df['target'].iloc[:-5]
+            m_rf.fit(X_train, y_train)
+            m_xgb.fit(X_train, y_train)
 
-        # --- 5. MULTI-FACTOR SIGNAL BLEND ---
-        models = st.session_state.live_brains[symbol]["models"]
-        # Fast inference
-        p_rf = models.predict_proba(df[features].tail(10))[:, 1]
-        p_xgb = models.predict_proba(df[features].tail(10))[:, 1]
+            st.session_state.live_brains[symbol] = {
+                "models": (m_rf, m_xgb), 
+                "time": now,
+                "features": features
+            }
+
+        # --- 3. INFERENCE & FEATURE MAP EXTRACTION ---
+        stored = st.session_state.live_brains[symbol]
+        m_rf, m_xgb = stored["models"]
+
+        # Extract 'Logic Map' from Random Forest
+        importances = m_rf.feature_importances_
+        feature_map = dict(zip(features, importances))
+
+        # Predict probability trend (last 10 bars)
+        last_rows = df[features].tail(10)
+        p_rf = m_rf.predict_proba(last_rows)[:, 1]
+        p_xgb = m_xgb.predict_proba(last_rows)[:, 1]
         probs = (p_rf + p_xgb) / 2
 
-        # FINAL PRECISION GATES (The 98% Filter)
-        # Gate 1: Volume Flow (VPT must be above its EMA)
+        # HARD GATES (Sanity Checks)
         vpt_gate = 1.0 if df['vpt'].iloc[-1] > df['vpt_ema'].iloc[-1] else 0.5
-        # Gate 2: Institutional Conviction (Price must be above VWAP)
         vwap_gate = 1.0 if df['close'].iloc[-1] > df['VWAP_D'].iloc[-1] else 0.0
-        # Gate 3: Trend Strength (ADX must be showing a trending market)
-        adx_gate = 1.0 if df['ADX_14'].iloc[-1] > 25 else 0.5
 
-        # Strategic Blend: 70% AI + 10% Volume + 10% Institutional + 10% Trend Strength
-        final_conf = (probs[-1] * 0.7) + (vpt_gate * 0.1) + (vwap_gate * 0.1) + (adx_gate * 0.1)
+        # Final Weighted Confidence (70% AI + 30% Hard Gates)
+        final_conf = (probs[-1] * 0.7) + (vpt_gate * 0.15) + (vwap_gate * 0.15)
+        final_conf = max(0.0, min(1.0, float(final_conf)))
 
-        return float(final_conf), [float(p) for p in probs]
+        return final_conf, [float(p) for p in probs], feature_map
 
     except Exception as e:
-        return 0.5, [0.5]*10
-
+        return 0.5, [0.5]*10, {}
 
 
 # Helper for execution (Supports USD/Shares toggle, Extended Hours, and Duplicate Protection)
@@ -250,7 +256,7 @@ def execute_trade(s, price, ai_conf, is_bot=False):
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
-@st.fragment(run_every=60)
+@st.fragment(run_every=30)
 def live_ui():
     status = get_market_status()
     market_open = status["open"]
@@ -349,6 +355,8 @@ def live_ui():
             )).df.reset_index()
 
             ai_conf, conf_hist = get_ai_prediction(df,s)
+            # Inside your ticker loop in live_ui()
+            ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
             price = float(df['close'].iloc[-1])
 
             # Layout columns
@@ -444,5 +452,19 @@ def live_ui():
         # CSV Export
         csv = pd.DataFrame(history_data).to_csv(index=False).encode('utf-8')
         st.download_button(label="📥 Export History (CSV)", data=csv, file_name="trade_history.csv", mime="text/csv")
+    st.divider()
+    with st.expander(f"🔍 AI Logic Breakdown: {s}"):
+    if feat_map:
+        # Convert to DataFrame for easy charting
+        feat_df = pd.DataFrame(list(feat_map.items()), columns=['Factor', 'Weight'])
+        feat_df = feat_df.sort_values(by='Weight', ascending=True)
 
+        # Display as a horizontal bar chart
+        st.bar_chart(feat_df.set_index('Factor'), horizontal=True, height=200)
+
+        # Quick Insight Text
+        top_factor = feat_df.iloc[-1]['Factor']
+        st.caption(f"Bot is currently prioritizing **{top_factor}** for {s} entries.")
+    else:
+        st.caption("Training data pending...")
 live_ui()
