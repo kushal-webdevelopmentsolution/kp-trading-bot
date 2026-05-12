@@ -454,17 +454,17 @@ def live_ui():
         st.download_button(label="📥 Export History (CSV)", data=csv, file_name="trade_history.csv", mime="text/csv")
     st.divider()
     with st.expander(f"🔍 AI Logic Breakdown: {s}"):
-    if feat_map:
-        # Convert to DataFrame for easy charting
-        feat_df = pd.DataFrame(list(feat_map.items()), columns=['Factor', 'Weight'])
-        feat_df = feat_df.sort_values(by='Weight', ascending=True)
+        if feat_map:
+            # Convert to DataFrame for easy charting
+            feat_df = pd.DataFrame(list(feat_map.items()), columns=['Factor', 'Weight'])
+            feat_df = feat_df.sort_values(by='Weight', ascending=True)
 
-        # Display as a horizontal bar chart
-        st.bar_chart(feat_df.set_index('Factor'), horizontal=True, height=200)
+            # Display as a horizontal bar chart
+            st.bar_chart(feat_df.set_index('Factor'), horizontal=True, height=200)
 
-        # Quick Insight Text
-        top_factor = feat_df.iloc[-1]['Factor']
-        st.caption(f"Bot is currently prioritizing **{top_factor}** for {s} entries.")
-    else:
-        st.caption("Training data pending...")
+            # Quick Insight Text
+            top_factor = feat_df.iloc[-1]['Factor']
+            st.caption(f"Bot is currently prioritizing **{top_factor}** for {s} entries.")
+        else:
+            st.caption("Training data pending...")
 live_ui()
