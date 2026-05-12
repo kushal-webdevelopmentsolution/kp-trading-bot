@@ -377,27 +377,26 @@ def live_ui():
                 else:
                     # Subtle indicator that the bot is watching but already owns it
                     st.caption(f"🛡️ Bot Watching {s} (Position Active)")
-            """
+
             # --- MANUAL BUY BUTTON ---
-            if s5.button("Buy", key=f"b_{s}"):
+            # if s5.button("Buy", key=f"b_{s}"):
                 # Pass the local variables 's', 'price', and 'ai_conf' into the function
-                execute_trade(s, price, ai_conf, is_bot=False)
-                time.sleep(1) # Brief pause for Alpaca sync
+                # execute_trade(s, price, ai_conf, is_bot=False)
+                # time.sleep(1) # Brief pause for Alpaca sync
                 # Insert your submit_order() call here
-                st.toast(f"Manual Buy Order Sent for {s}")
-                st.rerun()
+                # st.toast(f"Manual Buy Order Sent for {s}")
+                # st.rerun()
 
 
             # --- 3. AUTO-EXECUTION CHECK (The 98% Accuracy Gate) ---
-            if active_now and ai_conf >= st.session_state.ai_threshold:
-                if s not in held_symbols:
+            # if active_now and ai_conf >= st.session_state.ai_threshold:
+                # if s not in held_symbols:
                     # Pass the local variables 's', 'price', and 'ai_conf' into the function
-                    execute_trade(s, price, ai_conf, is_bot=True)
-                    st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
-                else:
+                    # execute_trade(s, price, ai_conf, is_bot=True)
+                    # st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
+                # else:
                     # Subtle indicator that the bot is watching but already owns it
-                    st.caption(f"Bot Watching {s} (Position Active)")
-            """
+                    # st.caption(f"Bot Watching {s} (Position Active)")
 
         except Exception as e:
             st.error(f"Error loading {s}: {e}")
