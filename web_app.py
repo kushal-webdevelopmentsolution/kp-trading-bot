@@ -119,50 +119,50 @@ def get_daily_pnl():
         return float(acc.equity) - float(acc.last_equity)
     except: return 0.0
 
-def get_ai_prediction(df):
-    try:
-        df = df.copy()
-        # 1. Advanced Technical Strategy (No NLTK needed)
-        df.ta.rsi(append=True)
-        df.ta.macd(append=True)
-        df.ta.adx(append=True)
-        df.ta.ema(length=20, append=True) # Trend Filter
-        df.ta.atr(append=True)             # Volatility Filter
+if "live_brains" not in st.session_state:
+    st.session_state.live_brains = {}
 
-        # 2. Target 98% Precision (Predicting a clear move +0.15% in next bar)
+def get_ai_prediction(df, symbol):
+    try:
+        # --- 1. LIGHTWEIGHT FEATURE ENGINEERING ---
+        df = df.copy()
+        # Only compute what is absolutely necessary
+        df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
+        df.ta.ema(length=20, append=True)
+
         df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
         df = df.dropna()
+        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'EMA'])]
 
-        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'EMA', 'ATR'])]
+        # --- 2. MULTI-CORE PARALLEL TRAINING ---
+        now = time.time()
+        brain_data = st.session_state.live_brains.get(symbol, {"time": 0})
 
-        # 3. Double-Ensemble (RF + XGBoost) for Stability
-        # We use fewer estimators for Streamlit speed but higher depth for precision
-        model_rf = RandomForestClassifier(n_estimators=100, max_depth=12, random_state=42)
-        model_xgb = xgb.XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.1, random_state=42)
+        if (now - brain_data["time"]) > 3600: # 1 Hour Retrain
+            # n_jobs=-1 uses ALL CPU cores to train in parallel
+            m_rf = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=-1, random_state=42)
+            # tree_method='hist' is the fastest training method for XGBoost
+            m_xgb = xgb.XGBClassifier(n_estimators=100, max_depth=6, tree_method='hist', n_jobs=-1)
 
-        # Training on all but last 5 bars
-        X_train = df[features].iloc[:-5]
-        y_train = df['target'].iloc[:-5]
+            X, y = df[features].iloc[:-5], df['target'].iloc[:-5]
+            m_rf.fit(X, y); m_xgb.fit(X, y)
 
-        model_rf.fit(X_train, y_train)
-        model_xgb.fit(X_train, y_train)
+            st.session_state.live_brains[symbol] = {"models": (m_rf, m_xgb), "time": now}
+            add_log(f"⚡ {symbol} Brain Re-optimized.")
 
-        # 4. Multi-Strategy Confirmation
-        # Combine probabilities from both models
-        prob_rf = model_rf.predict_proba(df[features].tail(10))[:, 1]
-        prob_xgb = model_xgb.predict_proba(df[features].tail(10))[:, 1]
+        # --- 3. INSTANT INFERENCE ---
+        models = st.session_state.live_brains[symbol]["models"]
+        # Fast prediction on the latest data row only
+        latest_row = df[features].tail(10)
+        p_rf = models[0].predict_proba(latest_row)[:, 1]
+        p_xgb = models[1].predict_proba(latest_row)[:, 1]
 
-        # Weighted Technical Confidence
-        tech_probs = (prob_rf * 0.5) + (prob_xgb * 0.5)
-
-        # Trend Confirmation: Only high confidence if price is above 20 EMA
+        tech_probs = (p_rf + p_xgb) / 2
         trend_gate = 1.0 if df['close'].iloc[-1] > df['EMA_20'].iloc[-1] else 0.0
-
-        # Final Score: 80% AI Prediction + 20% Trend Gate
         final_conf = (tech_probs[-1] * 0.8) + (trend_gate * 0.2)
 
         return float(final_conf), [float(p) for p in tech_probs]
-    except Exception as e:
+    except Exception:
         return 0.5, [0.5]*10
 
 # Helper for execution (Supports USD/Shares toggle, Extended Hours, and Duplicate Protection)
