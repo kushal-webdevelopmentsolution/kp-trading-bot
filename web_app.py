@@ -17,8 +17,8 @@ from alpaca.trading.enums import QueryOrderStatus
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY = "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
-    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
+    API_KEY =  st.secrets["API_KEY"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -252,19 +252,11 @@ st.title("🚀 AI Alpha Terminal")
 def live_ui():
     now_dt = datetime.now()
     last_refresh = now_dt.strftime("%I:%M:%S %p")
-    next_refresh_dt = now_dt + timedelta(seconds=60)
-    next_refresh = next_refresh_dt.strftime("%I:%M:%S %p")
 
-    # 2. Display Timing UI
-    t1, t2 = st.columns([2, 1])
-    with t1:
-        st.caption(f"🕒 Last Refresh: **{last_refresh}**")
-    with t2:
-        st.caption(f"⏭️ Next Update: **{next_refresh}**")
-
-    # Optional: Visual progress bar for the 60s loop
-    # Note: This bar resets to 0% every time the fragment reruns
-    st.progress(0, text="Engine Cycle active (60s timer)")
+    # 2. Display Header
+    t1, t2 = st.columns([1, 1])
+    t1.caption(f"🕒 Last Refresh: **{last_refresh}**")
+    prog_placeholder = t2.empty() # Placeholder for the countdown
 
     status = get_market_status()
     market_open = status["open"]
@@ -464,4 +456,8 @@ def live_ui():
         if feat_map:
             f_df = pd.DataFrame(list(feat_map.items()), columns=['Factor', 'Weight']).sort_values('Weight')
             st.bar_chart(f_df.set_index('Factor'), horizontal=True, height=200)
+
+    for percent_complete in range(100):
+        time.sleep(0.6) # 0.6s * 100 = 60 seconds
+        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {60 - int(percent_complete*0.6)}s")
 live_ui()
