@@ -5,6 +5,7 @@ pandas-ta
 alpaca-py
 scikit-learn
 matplotlib
-textblob
+pickle
+os
 xgboost
 
