@@ -300,6 +300,16 @@ def live_ui():
     else:
         st.info("No active positions.")
 
+    try:
+        order_filter = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        all_open_orders = trading_client.get_orders(filter=order_filter)
+        # Create a dictionary: { "SYMBOL": count }
+        pending_counts = {}
+        for o in all_open_orders:
+            pending_counts[o.symbol] = pending_counts.get(o.symbol, 0) + 1
+    except:
+        pending_counts = {}
+
         # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
@@ -318,7 +328,12 @@ def live_ui():
             # Layout columns
             s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
 
-            s1.write(f"**{s}**")
+            # s1.write(f"**{s}**")
+            p_count = pending_counts.get(s, 0)
+            if p_count > 0:
+                s1.write(f"**{s}** :orange[({p_count} Pending)]")
+            else:
+                s1.write(f"**{s}**")
             s2.write(f"${price:.2f}")
 
             # 1. VISUAL CONFIDENCE BAR
@@ -331,7 +346,38 @@ def live_ui():
             with s4:
                 st.line_chart(conf_hist, height=60, use_container_width=True)
 
+
+
+
             # Order Logic
+            # --- PRE-CHECK FOR MESSAGING ---
+            is_held = s in held_symbols
+            # Get pending count from the dictionary we created in the previous step
+            is_pending = pending_counts.get(s, 0) > 0
+
+            # Manual Buy Button
+            if s5.button("Buy", key=f"b_{s}"):
+                if is_held:
+                    st.error(f"Cannot Buy: You already have a position in {s}")
+                elif is_pending:
+                    st.warning(f"Cannot Buy: An order for {s} is already pending.")
+                else:
+                    execute_trade(s, price, ai_conf, is_bot=False)
+                    st.toast(f"👤 Manual Order Sent: {s}", icon="📥")
+                    time.sleep(1)
+                    st.rerun()
+
+            # --- 3. AUTO-EXECUTION CHECK (The 98% Accuracy Gate) ---
+            if active_now and ai_conf >= st.session_state.ai_threshold:
+                if not is_held and not is_pending:
+                    execute_trade(s, price, ai_conf, is_bot=True)
+                    st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
+                elif is_pending:
+                    st.caption(f"⏳ Bot skipping {s}: Order already in flight.")
+                else:
+                    # Subtle indicator that the bot is watching but already owns it
+                    st.caption(f"🛡️ Bot Watching {s} (Position Active)")
+            """
             # --- MANUAL BUY BUTTON ---
             if s5.button("Buy", key=f"b_{s}"):
                 # Pass the local variables 's', 'price', and 'ai_conf' into the function
@@ -351,7 +397,7 @@ def live_ui():
                 else:
                     # Subtle indicator that the bot is watching but already owns it
                     st.caption(f"Bot Watching {s} (Position Active)")
-
+            """
 
         except Exception as e:
             st.error(f"Error loading {s}: {e}")
