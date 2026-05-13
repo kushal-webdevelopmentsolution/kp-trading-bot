@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import pandas_ta as ta
 import os, json, time
+import datetime
+from pytz import UTC
 from datetime import datetime, timedelta
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -13,12 +15,14 @@ from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
 from alpaca.trading.requests import GetOrdersRequest
-from alpaca.trading.enums import QueryOrderStatus
+# Add Sort to your imports at the top of your file
+from alpaca.trading.enums import OrderClass, QueryOrderStatus
+
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  st.secrets["API_KEY"]
-    SECRET_KEY = st.secrets["SECRET_KEY"]
+    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
+    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -54,7 +58,7 @@ def add_log(msg):
 def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA"], "run_bot": False, "order_mode": "USD", 
                 "order_val": 1000.0, "trailing_pct": 0.02, "profit_target": 0.05, 
-                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.05,
+                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -102,8 +106,8 @@ with st.sidebar:
 
     st.divider()
     st.header("🛡️ Strategy")
-    st.slider("Trailing Start %", 0.01, 0.50, key="lock_profit_pct", on_change=save_settings)
-    st.slider("Stop Loss %", 0.01, 0.50, key="trailing_pct", on_change=save_settings)
+    st.slider("Trailing Start %", 1.0, 50.0, key="lock_profit_pct", on_change=save_settings)
+    st.slider("Stop Loss %", 1.0, 50.0, key="trailing_pct", on_change=save_settings)
 
     if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
         trading_client.close_all_positions(cancel_orders=True)
@@ -124,73 +128,112 @@ def get_daily_pnl():
     except: return 0.0
 
 def get_ai_prediction(df, symbol):
-    # FALLBACKS
+    # --- 1. INITIALIZE DEFAULTS & SESSION STATE ---
+    direction = "NEUTRAL"
     neutral_conf = 0.5
     neutral_hist = [0.5] * 10
     neutral_map = {}
 
+    if "model_vault" not in st.session_state:
+        st.session_state.model_vault = {}
+
     try:
-        # --- 1. DATA VALIDATION ---
+        # --- 2. DATA VALIDATION ---
         if df is None or len(df) < 50:
-            return neutral_conf, neutral_hist, neutral_map
+            return direction, neutral_conf, neutral_hist, neutral_map
 
         df = df.copy()
-        # Fast Indicators
+
+        # Indicator Calculations
         df.ta.rsi(append=True); df.ta.macd(append=True); df.ta.adx(append=True)
         df.ta.ema(length=20, append=True); df.ta.atr(append=True)
+        df.ta.bbands(append=True); df.ta.mfi(append=True)
+        df['VOL_SMA'] = ta.sma(df['volume'], length=20) 
 
-        # High-Precision Target (0.15% move)
-        df['target'] = (df['close'].shift(-1) > df['close'] * 1.0015).astype(int)
+        # Multi-Class Target (1=Long, 2=Short, 0=Neutral)
+        df['target'] = 0
+        df.loc[df['close'].shift(-1) > df['close'] * 1.0015, 'target'] = 1
+        df.loc[df['close'].shift(-1) < df['close'] * 0.9985, 'target'] = 2
+
         df = df.ffill().dropna()
 
-        features = [c for c in df.columns if any(x in c for x in ['RSI', 'MACD', 'ADX', 'EMA', 'ATR'])]
+        feature_keywords = ['RSI', 'MACD', 'ADX', 'EMA', 'ATR', 'BBL', 'BBU', 'MFI', 'volume', 'VOL_SMA']
+        features = [c for c in df.columns if any(x in c for x in feature_keywords)]
 
-        # --- 2. LIGHTWEIGHT TRAINING (Every 1 Hour) ---
+        # --- 3. TRAINING LOGIC ---
         now = time.time()
         brain = st.session_state.model_vault.get(symbol, {"time": 0})
 
         if (now - brain["time"]) > 3600:
-            # Multi-core training for speed
             m_rf = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=-1, random_state=42)
-            m_xgb = xgb.XGBClassifier(n_estimators=100, max_depth=6, tree_method='hist', n_jobs=-1)
+            m_xgb = xgb.XGBClassifier(
+                n_estimators=100, 
+                max_depth=6, 
+                objective='multi:softprob', 
+                num_class=3, 
+                tree_method='hist', 
+                n_jobs=-1
+            )
 
-            # Use a smaller slice for training to stay light
             train_data = df.iloc[-500:] if len(df) > 500 else df
+            # Ensure target classes 0, 1, 2 are present
             X, y = train_data[features].iloc[:-2], train_data['target'].iloc[:-2]
 
             m_rf.fit(X, y); m_xgb.fit(X, y)
 
-            # Save trained models to RAM
             st.session_state.model_vault[symbol] = {
                 "models": (m_rf, m_xgb), 
                 "time": now,
                 "importance": dict(zip(features, m_rf.feature_importances_))
             }
-            # Optional: st.toast(f"🧠 {symbol} Brain Re-Optimized")
 
-        # --- 3. INSTANT INFERENCE (Every Refresh) ---
-        # This part takes 0.001 seconds
+        # --- 4. INFERENCE ---
         active_brain = st.session_state.model_vault[symbol]
         rf_m, xgb_m = active_brain["models"]
 
-        # Predict on latest row only
-        last_row = df[features].tail(10)
-        p_rf = rf_m.predict_proba(last_row)[:, 1]
-        p_xgb = xgb_m.predict_proba(last_row)[:, 1]
-        tech_probs = (p_rf + p_xgb) / 2
+        last_rows = df[features].tail(10)
+        p_rf = rf_m.predict_proba(last_rows)
+        p_xgb = xgb_m.predict_proba(last_rows)
 
-        # Confirmation Gate
-        trend_gate = 1.0 if df['close'].iloc[-1] > df['EMA_20'].iloc[-1] else 0.0
-        final_conf = (tech_probs[-1] * 0.8) + (trend_gate * 0.2)
+        # Average probability (Class indices: 0=Neutral, 1=Long, 2=Short)
+        avg_probs = (p_rf + p_xgb) / 2
+        long_probs = avg_probs[:, 1]
+        short_probs = avg_probs[:, 2]
 
-        # Return Conf, History, and Feature Importance
-        return float(final_conf), [float(p) for p in tech_probs], active_brain["importance"]
+        # --- 5. LOGIC GATES ---
+        mfi_col = [c for c in df.columns if 'MFI' in c][0]
+        bbu_col = [c for c in df.columns if 'BBU' in c][0]
+        bbl_col = [c for c in df.columns if 'BBL' in c][0]
+
+        l_price, l_mfi = df['close'].iloc[-1], df[mfi_col].iloc[-1]
+        l_ema = df['EMA_20'].iloc[-1]
+        l_bbu, l_bbl = df[bbu_col].iloc[-1], df[bbl_col].iloc[-1]
+
+        final_conf = 0.0
+
+        # Long Logic
+        if long_probs[-1] > short_probs[-1] and long_probs[-1] > 0.4:
+            trend_gate = 1.0 if (l_price > l_ema and l_mfi > 45) else 0.5
+            final_conf = (long_probs[-1] * 0.7) + (trend_gate * 0.3)
+            if l_price <= l_bbl: final_conf = min(1.0, final_conf + 0.1)
+            if l_price >= l_bbu: final_conf = 0.0
+            if final_conf > 0.5: direction = "LONG"
+
+        # Short Logic
+        elif short_probs[-1] > long_probs[-1] and short_probs[-1] > 0.4:
+            trend_gate = 1.0 if (l_price < l_ema and l_mfi < 55) else 0.5
+            final_conf = (short_probs[-1] * 0.7) + (trend_gate * 0.3)
+            if l_price <= l_bbl: final_conf = 0.0
+            if final_conf > 0.5: direction = "SHORT"
+
+        return direction, float(final_conf), [float(p) for p in long_probs], active_brain["importance"]
 
     except Exception as e:
-        return neutral_conf, neutral_hist, neutral_map
+        st.error(f"AI Error: {e}")
+        return "NEUTRAL", 0.5, [0.5]*10, {}
 
 # Helper for execution (Supports USD/Shares toggle, Extended Hours, and Duplicate Protection)
-def execute_trade(s, price, ai_conf, is_bot=False):
+def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
     try:
         # --- 1. DUPLICATE PROTECTION: Check Positions and Pending Orders ---
         # Check if we already have a position
@@ -216,27 +259,32 @@ def execute_trade(s, price, ai_conf, is_bot=False):
 
         clock = trading_client.get_clock()
 
+        # Determine exit side for the Trailing Stop
+        # If entry is BUY, stop is SELL. If entry is SELL (Short), stop is BUY.
+        exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+
         # --- 3. MARKET HOURS EXECUTION ---
         if clock.is_open:
             # REGULAR MARKET HOURS
             trading_client.submit_order(MarketOrderRequest(
-                symbol=s, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC
+                symbol=s, qty=qty, side=side.value, time_in_force=TimeInForce.GTC
             ))
 
-            # Trailing Stop (Lifts automatically with price)
+            # Trailing Stop (Lifts/Drops automatically with price)
             trading_client.submit_order(TrailingStopOrderRequest(
-                symbol=s, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
-                trail_percent=round(float(st.session_state.trailing_pct * 100), 2)
+                symbol=s, qty=qty, side=exit_side.value, time_in_force=TimeInForce.GTC,
+                trail_percent=st.session_state.trailing_pct
             ))
         else:
             # EXTENDED HOURS (Limit order required)
             trading_client.submit_order(LimitOrderRequest(
-                symbol=s, qty=qty, limit_price=price, side=OrderSide.BUY, 
+                symbol=s, qty=qty, limit_price=price, side=side.value, 
                 time_in_force=TimeInForce.DAY, extended_hours=True
             ))
 
         # --- 4. LOGGING & NOTIFICATION ---
-        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} Entry: {s} @ {price} | Conf: {ai_conf:.1%} | Mode: {st.session_state.order_mode}"
+        action_type = "Long" if side == OrderSide.BUY else "Short"
+        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} {action_type} Entry: {s} @ {price} | Conf: {ai_conf:.1%} | Mode: {st.session_state.order_mode}"
         add_log(msg)
         st.toast(msg, icon="🚀")
 
@@ -300,29 +348,46 @@ def live_ui():
             if not clock.is_open:
                 current_price = float(p.current_price)
                 avg_entry = float(p.avg_entry_price)
+                # Detect side - handle different API response formats (attribute vs dict)
+                p_side = getattr(p, 'side', 'long').lower()
 
-                # Calculate PnL percentage from entry
-                current_pnl_pct = ((current_price - avg_entry) / avg_entry) * 100
+                # Calculate PnL percentage based on side
+                if p_side == 'short':
+                    # SHORT: Lose money if price rises (Entry - Current)
+                    current_pnl_pct = ((avg_entry - current_price) / avg_entry) * 100
+                else:
+                    # LONG: Lose money if price falls (Current - Entry)
+                    current_pnl_pct = ((current_price - avg_entry) / avg_entry) * 100
 
-                # If price drops below your trailing threshold (e.g., -2.0%)
+                # If PnL drops below your trailing threshold (e.g., -2.0%)
                 if current_pnl_pct <= -st.session_state.trailing_pct:
+                    # Determine Order Side: Shorts must BUY to cover; Longs must SELL
+                    order_side = OrderSide.BUY if p_side == 'short' else OrderSide.SELL
+
                     trading_client.submit_order(LimitOrderRequest(
                         symbol=p.symbol, 
-                        qty=p.qty, 
+                        qty=abs(float(p.qty)), # abs() ensures positive qty for short covers
                         limit_price=round(float(current_price), 2), 
-                        side=OrderSide.SELL, 
+                        side=order_side, 
                         time_in_force=TimeInForce.DAY, 
                         extended_hours=True
                     ))
-                    add_log(f"🌙 After-Hours Stop Triggered: Sold {p.symbol} at {current_price}")
+                    add_log(f"🌙 After-Hours Stop Triggered ({p_side.upper()}): {p.symbol} at {current_price}")
             # --- END VIRTUAL MONITORING LOGIC ---
 
             # --- START EXISTING UI CODE ---
             qty, mkt_val, pnl_pct = float(p.qty), float(p.market_value), float(p.unrealized_plpc) * 100
+
+            # Dynamic UI based on Side
+            current_side = getattr(p, 'side', 'long').lower()
+            side_icon = "🔴" if current_side == 'short' else "🟢"
+            pnl_color = "red" if pnl_pct < 0 else "green"
+
             c1, c2, c3, c4 = st.columns([1, 1, 1, 0.5])
-            c1.write(f"**{p.symbol}**")
+            c1.write(f"{side_icon} **{p.symbol}**")
             c2.write(f"${mkt_val:,.0f}")
-            c3.write(f"{pnl_pct:.2f}%")
+            # Styled PnL for better visibility
+            c3.markdown(f":{pnl_color}[{pnl_pct:.2f}%]")
 
             if c4.button("✖", key=f"cl_{p.symbol}"):
                 trading_client.close_position(p.symbol)
@@ -331,6 +396,7 @@ def live_ui():
             # --- END EXISTING UI CODE ---
     else:
         st.info("No active positions.")
+
 
     try:
         order_filter = GetOrdersRequest(status=QueryOrderStatus.OPEN)
@@ -342,7 +408,7 @@ def live_ui():
     except:
         pending_counts = {}
 
-        # AI Signal Feed
+    # AI Signal Feed
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
         try:
@@ -354,7 +420,8 @@ def live_ui():
                 feed=DataFeed.IEX
             )).df.reset_index()
 
-            ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
+            #ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
+            ai_dir, ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
             price = float(df['close'].iloc[-1])
 
             # Layout columns
@@ -366,20 +433,27 @@ def live_ui():
                 s1.write(f"**{s}** :orange[({p_count} Pending)]")
             else:
                 s1.write(f"**{s}**")
-            s2.write(f"${price:.2f}")
 
             # 1. VISUAL CONFIDENCE BAR
-            # Colors progress based on confidence level
-            conf_label = f"Confidence: {ai_conf:.1%}"
-            s3.progress(ai_conf, text=conf_label)
+            # Colors progress based on confidence level and trade direction
+            conf_label = f"{ai_dir} Conf: {ai_conf:.1%}"
+
+            # Route colors dynamically: LONG -> Green, SHORT -> Red, NEUTRAL -> Default/Gray
+            if ai_dir == "LONG":
+                # Starpf/Progress color syntax variation using custom markdown wrapper
+                s3.markdown(f"**Long Certainty**")
+                s3.progress(ai_conf, text=f"🍏 {conf_label}")
+            elif ai_dir == "SHORT":
+                s3.markdown(f"**Short Certainty**")
+                s3.progress(ai_conf, text=f"🍎 {conf_label}")
+            else:
+                s3.markdown(f"**Neutral/Flat**")
+                s3.progress(ai_conf, text=f"⚪ {conf_label}")
 
             # 2. CONFIDENCE TREND CHART
             # Shows if the AI is becoming more or less certain over the last 10 bars
             with s4:
                 st.line_chart(conf_hist, height=60, use_container_width=True)
-
-
-
 
             # Order Logic
             # --- PRE-CHECK FOR MESSAGING ---
@@ -399,16 +473,79 @@ def live_ui():
                     time.sleep(1)
                     st.rerun()
 
-            # --- 3. AUTO-EXECUTION CHECK (The 98% Accuracy Gate) ---
+            # --- 3. AUTO-EXECUTION CHECK (The Directional Accuracy Gate) ---
             if active_now and ai_conf >= st.session_state.ai_threshold:
-                if not is_held and not is_pending:
-                    execute_trade(s, round(float(price), 2), ai_conf, is_bot=True)
-                    st.success(f"🤖 AI TRIGGERED: Buying {s} at {ai_conf:.1%} confidence")
-                elif is_pending:
-                    st.caption(f"⏳ Bot skipping {s}: Order already in flight.")
-                else:
-                    # Subtle indicator that the bot is watching but already owns it
-                    st.caption(f"🛡️ Bot Watching {s} (Position Active)")
+
+                # --- COOL-DOWN GATE FOR CONSECUTIVE LOSSES (15 MINUTE LOCK) ---
+                is_cooled_down = False
+                try:
+                    # Request the last 2 closed/filled orders for this specific symbol
+                    order_filter = GetOrdersRequest(
+                        status=QueryOrderStatus.CLOSED,
+                        symbols=[s],
+                        limit=2,
+                        direction="desc"  # FIX: Replaced Sort.DESC with raw string value
+                    )
+                    recent_orders = trading_client.get_orders(order_filter)
+
+                    # Check if we have at least 2 closed orders to evaluate
+                    if recent_orders and len(recent_orders) >= 2:
+                        loss_count = 0
+                        # FIXED: Calls datetime.now() directly assuming 'from datetime import datetime' is used
+                        time_threshold = datetime.now(UTC) - timedelta(minutes=15)
+
+                        for o in recent_orders:
+                            # Confirm the order actually filled and happened within the 15-minute window
+                            if o.filled_at and o.filled_at >= time_threshold:
+                                f_price = float(o.filled_avg_price) if o.filled_avg_price else 0.0
+                                legs = o.legs if hasattr(o, 'legs') and o.legs else []
+
+                                # Method 1: Evaluate bracket structures
+                                if hasattr(o, 'legs') and legs:
+                                    for leg in legs:
+                                        if leg.status.value == "filled":
+                                            lf_price = float(leg.filled_avg_price) if leg.filled_avg_price else 0.0
+                                            if (o.side == OrderSide.BUY and lf_price < f_price) or (o.side == OrderSide.SELL and lf_price > f_price):
+                                                loss_count += 1
+                                else:
+                                    # Method 2: Standard tracking evaluation 
+                                    opp_side_loss = (o.side == OrderSide.SELL and f_price < float(price)) or (o.side == OrderSide.BUY and f_price > float(price))
+                                    if opp_side_loss:
+                                        loss_count += 1
+
+                        if loss_count >= 2:
+                            is_cooled_down = True
+                            st.error(f"🛑 {s} auto-execution locked! 2 consecutive losses in the last 15 mins.")
+                except Exception as e:
+                    st.caption(f"⚠️ Error checking cool-down status for {s}: {e}")
+
+                # Process trading signals only if the cooldown gate is not locked
+                if not is_cooled_down:
+                    # Check if we are currently neutral (not holding anything)
+                    if not is_held and not is_pending:
+
+                        # --- LONG TRIGGER (Buy) ---
+                        if ai_dir == "LONG":
+                            execute_trade(s, round(float(price), 2), ai_conf, side=OrderSide.BUY, is_bot=True)
+                            st.success(f"🤖 AI LONG: Buying {s} at {ai_conf:.1%} confidence")
+
+                        # --- SHORT TRIGGER (Sell Short) ---
+                        elif ai_dir == "SHORT":
+                            # Criteria: Ensure we aren't shorting at the statistical floor (BBL)
+                            bbl_cols = [c for c in df.columns if 'BBL' in c]
+                            l_bbl = df[bbl_cols[0]].iloc[-1] if bbl_cols else price
+
+                            # Additional Short Safety: Price must be at least 0.2% above the floor
+                            if price > (l_bbl * 1.0015):
+                                execute_trade(s, round(float(price), 2), ai_conf, side=OrderSide.BUY, is_bot=True)
+                                st.warning(f"📉 AI SHORT: Selling {s} at {ai_conf:.1%} confidence")
+                            else:
+                                st.caption(f"⚠️ Short skipped: {s} is too close to support floor (BBL).")
+                    elif is_pending:
+                        st.caption(f"⏳ Bot skipping {s}: Order already in flight.")
+                    else:
+                        st.caption(f"🛡️ Bot Watching {s} (Position Active)")
+
 
             # --- MANUAL BUY BUTTON ---
             # if s5.button("Buy", key=f"b_{s}"):
