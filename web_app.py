@@ -21,8 +21,8 @@ from alpaca.trading.enums import OrderClass, QueryOrderStatus
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
-    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
+    API_KEY =  st.secrets["API_KEY"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -57,8 +57,8 @@ def add_log(msg):
 
 def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA"], "run_bot": False, "order_mode": "USD", 
-                "order_val": 1000.0, "trailing_pct": 0.02, "profit_target": 0.05, 
-                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5,
+                "order_val": 1000.0, "trailing_pct": 2.0, "profit_target": 5.0, 
+                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5.0,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
     if os.path.exists(SETTINGS_FILE):
         try:
