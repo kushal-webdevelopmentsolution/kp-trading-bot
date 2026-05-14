@@ -442,7 +442,7 @@ def live_ui():
     else: m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
 
     # Positions
-        st.subheader("📊 Active Positions")
+    st.subheader("📊 Active Positions")
     pos = trading_client.get_all_positions()
     clock = trading_client.get_clock()
     held_symbols = {p.symbol for p in pos} # Essential for auto-execution check
