@@ -75,6 +75,17 @@ init_session_state()
 
 # --- 3. SIDEBAR ---
 with st.sidebar:
+
+    # 1. Interactive Sidebar Risk Controls
+    st.sidebar.markdown("### 🛡️ System Risk Settings")
+    # Calibrated specifically to track VIXY daily percentage spike metrics
+    cfg_vix_max = st.sidebar.slider("Max VIXY Daily Spike %", 5.0, 30.0, 10.0, 0.5)
+    cfg_index_drop = st.sidebar.slider("Max Index Daily Drop %", -10.0, -1.0, -5.0, 0.1)
+
+
+    # Manual Override Checkbox to completely force-ignore circuit breaker shutdowns
+    breaker_bypass = st.sidebar.checkbox("🔓 Bypass Crash Protection", value=False, help="Forces bot to trade regardless of crashes")
+
     st.header("🛒 Order Configuration")
     # Toggle between USD (Dollar) and Shares (Stock)
     # This updates st.session_state["order_mode"] automatically
@@ -633,6 +644,131 @@ def live_ui():
             # --- 3. AUTO-EXECUTION CHECK (The Directional Accuracy Gate) ---
             if active_now and ai_conf >= st.session_state.ai_threshold:
 
+                # ====================================================================================
+                # INSERT POINT A: MULTI-INDEX TECHNICAL CRASH PROTECTION WITH UI CONTROLS & BYPASS
+                # ====================================================================================
+                is_market_crashing = False
+                try:
+                    import datetime as crash_dt
+                    import time as sys_time
+
+                    # 1. Fetch current Volatility Technical Factor (VIXY) - Lookback increased to 2 for percentage calculation
+                    vix_req = StockBarsRequest(
+                        symbol_or_symbols="VIXY",
+                        timeframe=TimeFrame.Day,
+                        limit=2, # Modified from 1 to 2 to safely pull yesterday and today's candles
+                        feed=DataFeed.IEX
+                    )
+                    vix_data = data_client.get_stock_bars(vix_req).df.reset_index()
+
+                    # --- START DYNAMIC DAILY PERCENTAGE CHANGE CALCULATIONS ---
+                    if len(vix_data) >= 2:
+                        prev_vixy_close = float(vix_data['close'].iloc[-2])
+                        current_vix = float(vix_data['close'].iloc[-1])
+
+                        # Calculate daily shift percentage to assign to the status fields
+                        vixy_daily_change_pct = ((current_vix - prev_vixy_close) / prev_vixy_close) * 100
+                        vix_chg_str = f"{vixy_daily_change_pct:+.2f}%"
+
+                        # Set active target metric variable to point to the percentage shift instead of raw price
+                        vix_target_metric = vixy_daily_change_pct
+                    else:
+                        current_vix = float(vix_data['close'].iloc[-1]) if not vix_data.empty else 12.50
+                        vixy_daily_change_pct = 0.0
+                        vix_chg_str = "0.00%"
+                        vix_target_metric = 0.0 # Fallback to standard 0.0% change metric if bars look missing
+                    # --- END DYNAMIC DAILY PERCENTAGE CHANGE CALCULATIONS ---
+
+                    # 2. Fetch Multi-Index Benchmark Profiles (SPY, QQQ, IWM)
+                    benchmarks = ["SPY", "QQQ", "IWM"]
+                    bench_req = StockBarsRequest(
+                        symbol_or_symbols=benchmarks,
+                        timeframe=TimeFrame.Day,
+                        start=crash_dt.datetime.now() - crash_dt.timedelta(days=4),
+                        feed=DataFeed.IEX
+                    )
+                    bench_data = data_client.get_stock_bars(bench_req).df.reset_index()
+
+                    crash_reasons = []
+                    matrix_rows = []
+
+                    # Add VIX status data to row log collections using the updated percentage evaluation logic
+                    vix_status = "⚠️ CRASH" if vix_target_metric > cfg_vix_max else "🍏 SAFE"
+                    matrix_rows.append({
+                        "Technical Factor": "Volatility (VIXY)", 
+                        "Live Value": f"${current_vix:.2f}", 
+                        "Daily Chg %": vix_chg_str, 
+                        "Status": vix_status
+                    })
+
+                    # Verify high volatility regime against interactive slider value using the percentage logic
+                    if vix_target_metric > cfg_vix_max:
+                        crash_reasons.append(f"VIXY Spike ({vix_chg_str} > {cfg_vix_max:.1f}%)")
+
+                    # Calculate daily return for each baseline benchmark asset
+                    for ticker in benchmarks:
+                        ticker_df = bench_data[bench_data['symbol'] == ticker]
+                        if len(ticker_df) >= 2:
+                            prev_close = float(ticker_df['close'].iloc[-2])
+                            curr_price = float(ticker_df['close'].iloc[-1])
+                            daily_return_pct = ((curr_price - prev_close) / prev_close) * 100
+
+                            idx_status = "⚠️ CRASH" if daily_return_pct <= cfg_index_drop else "🍏 SAFE"
+                            matrix_rows.append({
+                                "Technical Factor": f"Benchmark ({ticker})", 
+                                "Live Value": f"${curr_price:,.2f}", 
+                                "Daily Chg %": f"{daily_return_pct:+.2f}%", 
+                                "Status": idx_status
+                            })
+
+                            # Trigger if any key index drops past the user selected parameter
+                            if daily_return_pct <= cfg_index_drop:
+                                crash_reasons.append(f"{ticker} Crash ({daily_return_pct:.2f}%)")
+                        else:
+                            matrix_rows.append({
+                                "Technical Factor": f"Benchmark ({ticker})", 
+                                "Live Value": "N/A", 
+                                "Daily Chg %": "N/A", 
+                                "Status": "🔄 FETCHING"
+                            })
+
+                    # Render live structural metric table directly inside the main UI container view 
+                    #with st.expander("📊 Live Market Risk Factor Matrix", expanded=False):
+                     #   st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True, hide_index=True)
+
+                    # 3. Evaluate Global Circuit Breaker State & Recovery Timer Tracking
+                    if crash_reasons:
+                        if not breaker_bypass:
+                            is_market_crashing = True
+                            # Store timestamp of the breach event to track recovery cooling periods
+                            st.session_state["last_crash_timestamp"] = sys_time.time()
+
+                            st.error(f"🚨 GLOBAL CIRCUIT BREAKER TRIPPED: {', '.join(crash_reasons)}")
+
+                            # Emergency Capital Safeguard: Purge exposures immediately
+                            trading_client.cancel_orders()
+                            trading_client.close_all_positions(cancel_orders=True)
+                        else:
+                            st.info("ℹ️ Circuit Breaker Tripped, but Bypass is active.")
+                    else:
+                        # If conditions are healthy, check if we are still cooling down from a recent crash
+                        if "last_crash_timestamp" in st.session_state:
+                            elapsed_seconds = sys_time.time() - st.session_state["last_crash_timestamp"]
+                            remaining_minutes = int((1800 - elapsed_seconds) / 60)
+
+                            if elapsed_seconds < 1800 and not breaker_bypass:  # 1800 seconds = 30 minutes rest period
+                                is_market_crashing = True
+                                st.warning(f"⏳ Post-Crash Safety Cooling: Resuming in {remaining_minutes} mins.")
+                            else:
+                                # Clean up state indicator once the 30 minute lock cleanly expires or bypass trips it
+                                del st.session_state["last_crash_timestamp"]
+                                st.success("🍏 Recovery Completed: Bot re-armed.")
+
+                except Exception as crash_err:
+                    st.caption(f"⚠️ Risk Framework temporary bypass: {crash_err}")
+
+
+
                 # --- COOL-DOWN GATE FOR CONSECUTIVE LOSSES (15 MINUTE LOCK) ---
                 is_cooled_down = False
                 try:
@@ -641,7 +777,7 @@ def live_ui():
                         status=QueryOrderStatus.CLOSED,
                         symbols=[s],
                         limit=2,
-                        direction="desc"  # FIX: Replaced Sort.DESC with raw string value
+                        direction='desc'  # FIX: Replaced Sort.DESC with raw string value
                     )
                     recent_orders = trading_client.get_orders(order_filter)
 
@@ -676,8 +812,10 @@ def live_ui():
                 except Exception as e:
                     st.caption(f"⚠️ Error checking cool-down status for {s}: {e}")
 
-                # Process trading signals only if the cooldown gate is not locked
-                if not is_cooled_down:
+                # ====================================================================================
+                # INSERT POINT B: MODIFIED OPERATIONAL GATE WAY
+                # ====================================================================================
+                if not is_cooled_down and not is_market_crashing:
                     # Check if we are currently neutral (not holding anything)
                     if not is_held and not is_pending:
 
@@ -702,6 +840,8 @@ def live_ui():
                         st.caption(f"⏳ Bot skipping {s}: Order already in flight.")
                     else:
                         st.caption(f"🛡️ Bot Watching {s} (Position Active)")
+                elif is_market_crashing:
+                    st.caption(f"🛑 Bot Blocked: Order routing blocked by multi-index crash constraints.")
 
 
             # --- MANUAL BUY BUTTON ---
@@ -727,6 +867,51 @@ def live_ui():
         except Exception as e:
             st.error(f"Error loading {s}: {e}")
             continue
+
+        # ====================================================================================
+    # HIGH-DENSITY PROGRESSIVE METRIC GRID (SHOWS EXACTLY ONCE PER REFRESH CYCLE)
+    # ====================================================================================
+    if not st.session_state.get("has_shown_risk_matrix", False):
+        st.markdown("### 📊 Market Risk Factor Metrics")
+
+        # Create 4 columns for VIXY, SPY, QQQ, and IWM
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+
+        # 1. Volatility Metric Card (VIXY Daily Percent Change vs Max Limit)
+        with m_col1:
+            vix_status_icon = "🟢" if "SAFE" in vix_status else "🔴"
+            st.metric(
+                label=f"{vix_status_icon} Volatility (VIXY)", 
+                value=vix_chg_str, # Displays the live daily return string (e.g. +4.25%)
+                delta=f"Max Limit: +{cfg_vix_max:.1f}%",
+                delta_color="normal" if "SAFE" in vix_status else "inverse"
+            )
+
+        # 2. Extract and parse index daily performances dynamically from your data
+        for ticker, col_target in zip(["SPY", "QQQ", "IWM"], [m_col2, m_col3, m_col4]):
+            ticker_df = bench_data[bench_data['symbol'] == ticker]
+            if len(ticker_df) >= 2:
+                p_close = float(ticker_df['close'].iloc[-2])
+                c_price = float(ticker_df['close'].iloc[-1])
+                ret_pct = ((c_price - p_close) / p_close) * 100
+
+                idx_icon = "🍏" if ret_pct > cfg_index_drop else "🚨"
+                with col_target:
+                    st.metric(
+                        label=f"{idx_icon} {ticker} Benchmark",
+                        value=f"${c_price:,.2f}",
+                        delta=f"{ret_pct:+.2f}% (Limit: {cfg_index_drop:+.1f}%)",
+                        delta_color="normal" if ret_pct > cfg_index_drop else "inverse"
+                    )
+            else:
+                with col_target:
+                    st.metric(label=f"🔄 {ticker}", value="Loading...")
+
+        st.markdown("---")
+        # Flip the state flag so subsequent tickers in the loop bypass printing this container
+        st.session_state["has_shown_risk_matrix"] = True
+    # ====================================================================================
+
 
     # --- PENDING ORDERS DASHBOARD TAB/ROW ---
     st.markdown("---")
@@ -810,6 +995,7 @@ def live_ui():
     else:
         st.info("No completed filled orders found in the selected date window.")
     st.divider()
+
 
 
     # Add this right after the progress bar in your loop
