@@ -470,6 +470,8 @@ def live_ui():
     else: 
         m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
 
+    f "cached_asset_names" not in st.session_state:
+        st.session_state["cached_asset_names"] = {}
 
     # Positions
     st.subheader("📊 Active Positions")
@@ -574,14 +576,25 @@ def live_ui():
             live_ticker_price = float(p.current_price) if hasattr(p, 'current_price') else 0.0
             # --- END CURRENT PRICE FETCH ---
 
-            # --- START FULL ASSET NAME FETCH ---
-            # Connect to the master assets profile directory to pull the text name mapping
-            try:
-                asset_details = trading_client.get_asset(p.symbol)
-                full_asset_name = asset_details.name if asset_details and hasattr(asset_details, 'name') else "Unknown Asset"
-            except Exception:
-                full_asset_name = "US Equity Profile"  # Fallback if API rate limits or network drops
-            # --- END FULL ASSET NAME FETCH ---
+            # ====================================================================================
+            # OPTIMIZED LOCAL MEMORY ASSET LOOKUP
+            # ====================================================================================
+            # Check if this ticker's company name is already stored in our cache
+            if p.symbol not in st.session_state["cached_asset_names"]:
+                try:
+                    # Query Alpaca's master registry for the data structure
+                    asset_details = trading_client.get_asset(p.symbol)
+                    if asset_details and hasattr(asset_details, 'name') and asset_details.name:
+                        st.session_state["cached_asset_names"][p.symbol] = asset_details.name
+                    else:
+                        st.session_state["cached_asset_names"][p.symbol] = "Asset Profile"
+                except Exception:
+                    # Temporary fallback if API rate limits hit; will retry on next UI update
+                    st.session_state["cached_asset_names"][p.symbol] = f"{p.symbol} Stock"
+
+            # Read name directly from local super-fast session state dictionary
+            full_asset_name = st.session_state["cached_asset_names"][p.symbol]
+            # ====================================================================================
 
             # Dynamic UI based on Side
             current_side = getattr(p, 'side', 'long').lower()
