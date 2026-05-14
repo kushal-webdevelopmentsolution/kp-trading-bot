@@ -442,16 +442,17 @@ def live_ui():
     else: m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
 
     # Positions
-    st.subheader("📊 Active Positions")
+        st.subheader("📊 Active Positions")
     pos = trading_client.get_all_positions()
     clock = trading_client.get_clock()
     held_symbols = {p.symbol for p in pos} # Essential for auto-execution check
     if pos:
         # --- START TABLE COLUMNS HEADER ---
         # Define header row outside or at the start of your positions iteration block
-        # Ensure the column layout sizing definitions exactly match your dynamic data rows below
-        h1, h2, h3, h_tot, h_day, h4 = st.columns([1, 1, 1, 1.2, 1.2, 0.5])
+        # FIXED: Expanded layouts matrix from 6 to 7 columns to allocate room for Current Price
+        h1, h_price, h2, h3, h_tot, h_day, h4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
         h1.markdown("**Symbol**")
+        h_price.markdown("**Current Price**") # New Column Header
         h2.markdown("**Market Value**")
         h3.markdown("**PnL %**")
         h_tot.markdown("**Total Gain**")
@@ -536,6 +537,11 @@ def live_ui():
             # --- START EXISTING UI CODE ---
             qty, mkt_val, pnl_pct = float(p.qty), float(p.market_value), float(p.unrealized_plpc) * 100
 
+            # --- START CURRENT PRICE FETCH ---
+            # Safely extract live ticking price parameter straight from position object attributes
+            live_ticker_price = float(p.current_price) if hasattr(p, 'current_price') else 0.0
+            # --- END CURRENT PRICE FETCH ---
+
             # Dynamic UI based on Side
             current_side = getattr(p, 'side', 'long').lower()
             side_icon = "🔴" if current_side == 'short' else "🟢"
@@ -556,9 +562,14 @@ def live_ui():
             # --- END GAIN CALCULATIONS ---
 
             # Layout columns adjusted to safely fit the new performance columns
-            c1, c2, c3, c_tot, c_day, c4 = st.columns([1, 1, 1, 1.2, 1.2, 0.5])
+            # FIXED: Aligned structure columns definition matching the header configuration above
+            c1, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
 
             c1.write(f"{side_icon} **{p.symbol}**")
+
+            # 1. Print the Live Ticker Price value token
+            c_price.write(f"${live_ticker_price:,.2f}")
+
             c2.write(f"${mkt_val:,.0f}")
 
             # Styled PnL for better visibility
@@ -589,6 +600,7 @@ def live_ui():
             pending_counts[o.symbol] = pending_counts.get(o.symbol, 0) + 1
     except:
         pending_counts = {}
+
 
     # AI Signal Feed
     st.subheader("⚡ AI Signals")
