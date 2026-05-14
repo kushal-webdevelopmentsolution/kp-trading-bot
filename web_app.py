@@ -690,8 +690,26 @@ def live_ui():
                 market_badge = " "  # Fallback gracefully if asset mapping fails
             # --- END 24H MARKET STATUS CHECK ---
 
+            # --- START CACHED NAME LOOKUP FOR WATCHLIST SYMBOL ---
+            if "cached_asset_names" not in st.session_state:
+                st.session_state["cached_asset_names"] = {}
+
+            if s not in st.session_state["cached_asset_names"]:
+                try:
+                    asset_details = trading_client.get_asset(s)
+                    if asset_details and hasattr(asset_details, 'name') and asset_details.name:
+                        st.session_state["cached_asset_names"][s] = asset_details.name
+                    else:
+                        st.session_state["cached_asset_names"][s] = f"{s} Asset"
+                except Exception:
+                    st.session_state["cached_asset_names"][s] = f"{s} Stock"
+
+            full_asset_name = st.session_state["cached_asset_names"][s]
+            # --- END CACHED NAME LOOKUP FOR WATCHLIST SYMBOL ---
+
+
             # Layout columns
-            s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
+            s1, s_name, s2, s3, s4, s5 = st.columns([1, 1.8, 1, 1.5, 2, 1])
 
             # s1.write(f"**{s}**")
             p_count = pending_counts.get(s, 0)
@@ -699,6 +717,9 @@ def live_ui():
                 s1.write(f"**{s}** {market_badge}:orange[({p_count} Pending)]")
             else:
                 s1.write(f"**{s}** {market_badge}")
+
+            # Render the cached company description asset name string
+            s_name.write(f"{full_asset_name}")
 
             # 1. VISUAL CONFIDENCE BAR
             # Colors progress based on confidence level and trade direction
