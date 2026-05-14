@@ -11,6 +11,7 @@ from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetPortfolioHistoryRequest
+from alpaca.trading.requests import TakeProfitRequest, StopLossRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from sklearn.ensemble import RandomForestClassifier
 import xgboost as xgb
@@ -21,8 +22,8 @@ from zoneinfo import ZoneInfo
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
-    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
+    API_KEY =  st.secrets["API_KEY"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -42,7 +43,7 @@ if "model_vault" not in st.session_state:
 def save_settings():
     keys = ["tickers", "run_bot", "order_mode", "order_val", "trailing_pct", 
             "profit_target", "ai_threshold", "vix_threshold", "lock_profit_pct", 
-            "daily_loss_limit", "global_profit_goal", "allow_ext_hours"]
+            "daily_loss_limit", "global_profit_goal", "allow_ext_hours","profit_target"]
     settings_data = {k: st.session_state[k] for k in keys if k in st.session_state}
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings_data, f, indent=4)
@@ -59,7 +60,7 @@ def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA", "WMI","FDVV"], "run_bot": False, "order_mode": "USD", 
                 "order_val": 1000.0, "trailing_pct": 2.0, "profit_target": 5.0, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5.0,
-                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
+                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False,"profit_target":2.0}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f: defaults.update(json.load(f))
@@ -118,6 +119,16 @@ with st.sidebar:
     st.divider()
     st.header("🛡️ Strategy")
     st.slider("Trailing Start %", 1.0, 50.0, key="lock_profit_pct", on_change=save_settings)
+    # Take Profit threshold slider (e.g., automatically close position at +5.0% profit)
+    st.slider(
+        "Take Profit Target %", 
+        min_value=1.0, 
+        max_value=50.0, 
+        step=0.5,
+        key="profit_target",
+        on_change=save_settings,
+        help="Automatically liquidates an active position if its profit matches or exceeds this percentage."
+    )
     st.slider("Stop Loss %", 1.0, 50.0, key="trailing_pct", on_change=save_settings)
 
     if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
@@ -247,12 +258,10 @@ def get_ai_prediction(df, symbol):
 def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
     try:
         # --- 1. DUPLICATE PROTECTION: Check Positions and Pending Orders ---
-        # Check if we already have a position
         pos = trading_client.get_all_positions()
         if any(p.symbol == s for p in pos):
             return # Exit silently if position exists
 
-        # Check if an order is already waiting to be filled
         order_filter = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[s])
         open_orders = trading_client.get_orders(filter=order_filter)
         if open_orders:
@@ -270,32 +279,49 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
 
         clock = trading_client.get_clock()
 
-        # Determine exit side for the Trailing Stop
-        # If entry is BUY, stop is SELL. If entry is SELL (Short), stop is BUY.
+        # Determine exit side for the advanced legs
         exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
 
-        # --- 3. MARKET HOURS EXECUTION ---
-        if clock.is_open:
-            # REGULAR MARKET HOURS
-            trading_client.submit_order(MarketOrderRequest(
-                symbol=s, qty=qty, side=side.value, time_in_force=TimeInForce.GTC
-            ))
+        # --- 3. ADVANCED EXIT TARGET PRICE CALCULATIONS ---
+        # Derive precise price values based on your saved sidebar slider states
+        # Handles Short Sell math automatically if side == OrderSide.SELL
+        tp_multiplier = 1 + (st.session_state.profit_target / 100.0) if side == OrderSide.BUY else 1 - (st.session_state.profit_target / 100.0)
+        sl_multiplier = 1 - (st.session_state.trailing_pct / 100.0) if side == OrderSide.BUY else 1 + (st.session_state.trailing_pct / 100.0)
 
-            # Trailing Stop (Lifts/Drops automatically with price)
-            trading_client.submit_order(TrailingStopOrderRequest(
-                symbol=s, qty=qty, side=exit_side.value, time_in_force=TimeInForce.GTC,
-                trail_percent=st.session_state.trailing_pct
+        target_take_profit_price = round(price * tp_multiplier, 2)
+        target_stop_loss_price = round(price * sl_multiplier, 2)
+
+        # --- 4. EXECUTION MATRIX ---
+        if clock.is_open:
+            # REGULAR MARKET HOURS: Advanced Bracket Order (Entry via LIMIT)
+            # The exchange holds the exit legs until your entry price is filled
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=s,
+                qty=qty,
+                limit_price=price,
+                side=side.value,
+                time_in_force=TimeInForce.GTC,
+                order_class=OrderClass.BRACKET, # Bundles the entire sequence
+                take_profit=TakeProfitRequest(limit_price=target_take_profit_price),
+                stop_loss=StopLossRequest(stop_price=target_stop_loss_price)
             ))
         else:
-            # EXTENDED HOURS (Limit order required)
+            # EXTENDED HOURS: Extended Limit order (Exit target attached once standard hours open)
             trading_client.submit_order(LimitOrderRequest(
-                symbol=s, qty=qty, limit_price=price, side=side.value, 
-                time_in_force=TimeInForce.DAY, extended_hours=True
+                symbol=s, 
+                qty=qty, 
+                limit_price=price, 
+                side=side.value, 
+                time_in_force=TimeInForce.DAY, 
+                extended_hours=True,
+                order_class=OrderClass.BRACKET,
+                take_profit=TakeProfitRequest(limit_price=target_take_profit_price),
+                stop_loss=StopLossRequest(stop_price=target_stop_loss_price)
             ))
 
-        # --- 4. LOGGING & NOTIFICATION ---
+        # --- 5. LOGGING & NOTIFICATION ---
         action_type = "Long" if side == OrderSide.BUY else "Short"
-        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} {action_type} Entry: {s} @ {price} | Conf: {ai_conf:.1%} | Mode: {st.session_state.order_mode}"
+        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} {action_type} Advanced Limit Entry Set: {s} @ ${price} | TP Target: ${target_take_profit_price} | SL Target: ${target_stop_loss_price}"
         add_log(msg)
         st.toast(msg, icon="🚀")
 
@@ -369,13 +395,10 @@ def get_trade_history_df(trading_client, limit=50, start_date=None, end_date=Non
         st.error(f"Error fetching trade history: {e}")
         return pd.DataFrame()
 
-
-
-
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
-@st.fragment(run_every=30)
+@st.fragment(run_every=60)
 def live_ui():
     # Fetch current time localized explicitly to the Central Time Zone
     now_dt = datetime.now(ZoneInfo("America/Chicago"))
