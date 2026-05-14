@@ -351,31 +351,86 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
             ))
         else:
             # ====================================================================================
-            # OPTIMIZED EXTENDED-HOURS OCO RISK PROTECTION MATRIX 
+            # STEP 1: SUBMIT ENTRY LIMIT ORDER (COMPLIANT WITH AFTER-HOURS RULES)
             # ====================================================================================
-            # 1. Submit the core entry limit order specifically flagged for extended hours execution
-            trading_client.submit_order(LimitOrderRequest(
-                symbol=s, 
-                qty=qty, 
-                limit_price=price, 
-                side=side.value, 
-                time_in_force=TimeInForce.DAY, 
-                extended_hours=True # Essential to allow filling overnight
-            ))
-
-            # 2. Submit an independent OCO (One-Cancels-the-Other) order class block.
-            # We use TakeProfitRequest and StopLossRequest but Alpaca processes them natively 
-            # as parallel overnight-safe LIMIT orders because of the OCO layout wrapper.
-            trading_client.submit_order(LimitOrderRequest(
+            entry_order = trading_client.submit_order(LimitOrderRequest(
                 symbol=s,
                 qty=qty,
-                side=exit_side.value,
-                time_in_force=TimeInForce.GTC,
-                order_class=OrderClass.OCO, # Swapped from OTO to OCO to bypass night validation bugs
-                take_profit=TakeProfitRequest(limit_price=target_take_profit_price),
-                stop_loss=StopLossRequest(stop_price=target_stop_loss_price)
+                limit_price=price,
+                side=side.value,
+                time_in_force=TimeInForce.DAY,  # Mandatory for extended hours
+                extended_hours=True            # Bypasses regular hours validation
             ))
+
+            print(f"Entry order {entry_order.id} submitted. Awaiting execution...")
+
             # ====================================================================================
+            # STEP 2: MONITOR ENTRY ORDER FILL STATE
+            # ====================================================================================
+            is_filled = False
+            while not is_filled:
+                check_order = trading_client.get_order_by_id(entry_order.id)
+
+                if check_order.status == OrderStatus.FILLED:
+                    print("Entry order filled! Deploying synthetic brackets...")
+                    is_filled = True
+                elif check_order.status in [OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
+                    raise RuntimeError(f"Entry order terminated without filling: {check_order.status}")
+
+                time.sleep(1) # Frequency buffer to prevent API rate limiting
+
+            # ====================================================================================
+            # STEP 3: SUBMIT INDEPENDENT AFTER-HOURS EXIT LEGS
+            # ====================================================================================
+            # Profit Booking Leg (Standard Limit)
+            tp_order = trading_client.submit_order(LimitOrderRequest(
+                symbol=s,
+                qty=qty,
+                limit_price=target_take_profit_price,
+                side=exit_side.value,
+                time_in_force=TimeInForce.DAY,
+                extended_hours=True
+            ))
+
+            # Synthetic Stop Loss Leg (Must be submitted as a LIMIT order for after-hours)
+            sl_order = trading_client.submit_order(LimitOrderRequest(
+                symbol=s,
+                qty=qty,
+                limit_price=target_stop_loss_price,
+                side=exit_side.value,
+                time_in_force=TimeInForce.DAY,
+                extended_hours=True
+            ))
+
+            # ====================================================================================
+            # STEP 4: OCO REPLICATION LOOP (MUTUAL CANCELLATION ENGINE)
+            # ====================================================================================
+            while True:
+                tp_status = trading_client.get_order_by_id(tp_order.id).status
+                sl_status = trading_client.get_order_by_id(sl_order.id).status
+
+                # If profit target hit, kill the stop loss
+                if tp_status == OrderStatus.FILLED:
+                    print("Take profit filled. Cancelling synthetic stop loss.")
+                    trading_client.cancel_order_by_id(sl_order.id)
+                    break
+
+                # If stop target hit, kill the profit target
+                if sl_status == OrderStatus.FILLED:
+                    print("Stop loss filled. Cancelling take profit order.")
+                    trading_client.cancel_order_by_id(tp_order.id)
+                    break
+
+                # Safeguard against manual or daily closing cancellations
+                if tp_status == OrderStatus.CANCELED or sl_status == OrderStatus.CANCELED:
+                    print("One of the legs was cancelled externally. Cleaning up remaining positions.")
+                    try: trading_client.cancel_order_by_id(tp_order.id)
+                    except: pass
+                    try: trading_client.cancel_order_by_id(sl_order.id)
+                    except: pass
+                    break
+
+                time.sleep(1)
 
         # --- 5. LOGGING & NOTIFICATION ---
         action_type = "Long" if side == OrderSide.BUY else "Short"
