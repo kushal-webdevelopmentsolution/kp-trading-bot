@@ -1135,7 +1135,7 @@ def live_ui():
                     data=csv_bytes, 
                     file_name="filtered_trade_history.csv", 
                     mime="text/csv",
-                    key="btn_export_filtered_history"
+                    key="btn_export_filtered_history", disabled=admin_disabled
                 )
 
             # Render the interactive UI table matching your specifications
