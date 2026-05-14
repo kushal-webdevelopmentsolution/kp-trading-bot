@@ -398,6 +398,10 @@ def get_trade_history_df(trading_client, limit=50, start_date=None, end_date=Non
         st.error(f"Error fetching trade history: {e}")
         return pd.DataFrame()
 
+if "cached_asset_names" not in st.session_state:
+    st.session_state["cached_asset_names"] = {}
+
+
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
@@ -469,9 +473,6 @@ def live_ui():
         m3.error(f"🛑 {bot_reason}")
     else: 
         m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
-
-    f "cached_asset_names" not in st.session_state:
-        st.session_state["cached_asset_names"] = {}
 
     # Positions
     st.subheader("📊 Active Positions")
@@ -617,9 +618,13 @@ def live_ui():
 
             # Layout columns adjusted to safely fit the new performance columns
             # FIXED: Aligned structure columns definition matching the header configuration above
-            c1, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
+            #c1, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
+            c1, c_name, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1.8, 1, 1, 1, 1.2, 1.2, 0.5])
 
             c1.write(f"{side_icon} **{p.symbol}**")
+
+            # Output the company description name string from cache
+            c_name.write(f"{full_asset_name}")
 
             # 1. Print the Live Ticker Price value token
             c_price.write(f"${live_ticker_price:,.2f}")
@@ -961,7 +966,7 @@ def live_ui():
             st.error(f"Error loading {s}: {e}")
             continue
 
-        # ====================================================================================
+    # ====================================================================================
     # HIGH-DENSITY PROGRESSIVE METRIC GRID (SHOWS EXACTLY ONCE PER REFRESH CYCLE)
     # ====================================================================================
     if not st.session_state.get("has_shown_risk_matrix", False):
