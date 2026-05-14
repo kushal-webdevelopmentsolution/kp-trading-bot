@@ -74,51 +74,95 @@ def init_session_state():
 
 init_session_state()
 
+if "is_admin_unlocked" not in st.session_state:
+        st.session_state["is_admin_unlocked"] = False
+
+
 # --- 3. SIDEBAR ---
 with st.sidebar:
+
+    # ====================================================================================
+    # 🔒 SINGLE-FORM ADMIN AUTHENTICATION GATE (STREAMLIT SECRETS)
+    # ====================================================================================
+    # Initialize the persistent lock boolean in memory if missing
+
+    st.sidebar.markdown("### 🔑 System Authorization")
+
+    # Render lock status indicator badges
+    if st.session_state["is_admin_unlocked"]:
+        st.sidebar.success("🔓 Admin Mode Active")
+        if st.sidebar.button("🔒 Lock Admin Settings", use_container_width=True):
+            st.session_state["is_admin_unlocked"] = False
+            st.rerun()
+    else:
+        st.sidebar.warning("🔒 Viewer Mode (Controls Locked)")
+
+        # Isolated authentication container form wrapper
+        with st.sidebar.form("admin_auth_form", clear_on_submit=True):
+            input_pass = st.text_input("Enter Admin Password", type="password", placeholder="Password")
+            submit_auth = st.form_submit_button("⚡ Unlock Admin Access", use_container_width=True)
+
+            if submit_auth:
+                try:
+                    # Compare entered token string against the hidden Streamlit secret string
+                    if input_pass == st.secrets["trading_credentials"]["admin_password"]:
+                        st.session_state["is_admin_unlocked"] = True
+                        st.toast("Admin clearance granted! Controls unlocked.", icon="🔓")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect key token.")
+                except KeyError:
+                    st.error("Secrets file '[trading_credentials][admin_password]' is missing.")
+
+    st.sidebar.divider()
+    # ====================================================================================
+
+    # --- 3. DYNAMIC CONTROL SYSTEM REGIME ---
+    # Assign the master true/false disabled flag parameter based on the form status
+    admin_disabled = not st.session_state["is_admin_unlocked"]
 
     # 1. Interactive Sidebar Risk Controls
     st.sidebar.markdown("### 🛡️ System Risk Settings")
     # Calibrated specifically to track VIXY daily percentage spike metrics
-    cfg_vix_max = st.sidebar.slider("Max VIXY Daily Spike %", 5.0, 30.0, 10.0, 0.5)
-    cfg_index_drop = st.sidebar.slider("Max Index Daily Drop %", -10.0, -1.0, -5.0, 0.1)
+    cfg_vix_max = st.sidebar.slider("Max VIXY Daily Spike %", 5.0, 30.0, 10.0, 0.5, disabled=admin_disabled)
+    cfg_index_drop = st.sidebar.slider("Max Index Daily Drop %", -10.0, -1.0, -5.0, 0.1, , disabled=admin_disabled)
 
 
     # Manual Override Checkbox to completely force-ignore circuit breaker shutdowns
-    breaker_bypass = st.sidebar.checkbox("🔓 Bypass Crash Protection", value=False, help="Forces bot to trade regardless of crashes")
+    breaker_bypass = st.sidebar.checkbox("🔓 Bypass Crash Protection", value=False, help="Forces bot to trade regardless of crashes", disabled=admin_disabled)
 
     st.header("🛒 Order Configuration")
     # Toggle between USD (Dollar) and Shares (Stock)
     # This updates st.session_state["order_mode"] automatically
-    st.selectbox("Order Mode", options=["USD", "Shares"], key="order_mode", on_change=save_settings)
+    st.selectbox("Order Mode", options=["USD", "Shares"], key="order_mode", on_change=save_settings, disabled=admin_disabled)
 
     # Dynamic Label and Value based on selection
     if st.session_state.order_mode == "USD":
-        st.number_input("Order Amount ($)", min_value=1.0, step=10.0, key="order_val", on_change=save_settings)
+        st.number_input("Order Amount ($)", min_value=1.0, step=10.0, key="order_val", on_change=save_settings, disabled=admin_disabled)
     else:
-        st.number_input("Number of Shares", min_value=1.0, step=1.0, key="order_val", on_change=save_settings)
+        st.number_input("Number of Shares", min_value=1.0, step=1.0, key="order_val", on_change=save_settings, disabled=admin_disabled)
     st.divider()    
     st.header("🤖 Bot Control")
-    st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings)
-    st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings)
-    st.slider("AI Trigger Threshold", 0.50, 0.98, key="ai_threshold", on_change=save_settings)
+    st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings, disabled=admin_disabled)
+    st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings, disabled=admin_disabled)
+    st.slider("AI Trigger Threshold", 0.50, 0.98, key="ai_threshold", on_change=save_settings, disabled=admin_disabled)
 
     st.divider()
     st.header("📂 Watchlist")
     new_t = st.text_input("Add Ticker").upper().strip()
-    if st.button("➕ Add"):
+    if st.button("➕ Add", disabled=admin_disabled):
         if new_t and new_t not in st.session_state.tickers:
             st.session_state.tickers.append(new_t); save_settings(); st.rerun()
-    st.multiselect("Active Watchlist", options=st.session_state.tickers, key="tickers", on_change=save_settings)
+    st.multiselect("Active Watchlist", options=st.session_state.tickers, key="tickers", on_change=save_settings, disabled=admin_disabled)
 
     st.divider()
     st.header("🏁 Daily Targets")
-    st.number_input("Profit Goal ($)", key="global_profit_goal", on_change=save_settings)
-    st.number_input("Loss Limit ($)", key="daily_loss_limit", on_change=save_settings)
+    st.number_input("Profit Goal ($)", key="global_profit_goal", on_change=save_settings, disabled=admin_disabled)
+    st.number_input("Loss Limit ($)", key="daily_loss_limit", on_change=save_settings, disabled=admin_disabled)
 
     st.divider()
     st.header("🛡️ Strategy")
-    st.slider("Trailing Start %", 1.0, 50.0, key="lock_profit_pct", on_change=save_settings)
+    st.slider("Trailing Start %", 1.0, 50.0, key="lock_profit_pct", on_change=save_settings, disabled=admin_disabled)
     # Take Profit threshold slider (e.g., automatically close position at +5.0% profit)
     st.slider(
         "Take Profit Target %", 
@@ -127,11 +171,11 @@ with st.sidebar:
         step=0.5,
         key="profit_target",
         on_change=save_settings,
-        help="Automatically liquidates an active position if its profit matches or exceeds this percentage."
+        help="Automatically liquidates an active position if its profit matches or exceeds this percentage.", disabled=admin_disabled
     )
-    st.slider("Stop Loss %", 1.0, 50.0, key="trailing_pct", on_change=save_settings)
+    st.slider("Stop Loss %", 1.0, 50.0, key="trailing_pct", on_change=save_settings, disabled=admin_disabled)
 
-    if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True):
+    if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True, disabled=admin_disabled):
         trading_client.close_all_positions(cancel_orders=True)
         add_log("EMERGENCY SHUTDOWN: All positions closed.")
         st.session_state.run_bot = False; save_settings(); st.rerun()
@@ -640,7 +684,7 @@ def live_ui():
             # 2. Display daily dynamic intraday gain column
             c_day.markdown(f":{day_color}[{day_prefix}${daily_gain:,.2f}]")
 
-            if c4.button("✖", key=f"cl_{p.symbol}"):
+            if c4.button("✖", key=f"cl_{p.symbol}", disabled=admin_disabled):
                 trading_client.close_position(p.symbol)
                 add_log(f"Manual Close: {p.symbol}")
                 st.rerun()
@@ -736,7 +780,7 @@ def live_ui():
             is_pending = pending_counts.get(s, 0) > 0
 
             # Manual Buy Button
-            if s5.button("Buy", key=f"b_{s}"):
+            if s5.button("Buy", key=f"b_{s}", disabled=admin_disabled):
                 if is_held:
                     st.error(f"Cannot Buy: You already have a position in {s}")
                 elif is_pending:
