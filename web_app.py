@@ -21,8 +21,8 @@ from zoneinfo import ZoneInfo
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  st.secrets["API_KEY"]
-    SECRET_KEY = st.secrets["SECRET_KEY"]
+    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
+    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -1009,6 +1009,6 @@ def live_ui():
             st.bar_chart(f_df.set_index('Factor'), horizontal=True, height=200)
 
     for percent_complete in range(100):
-        time.sleep(0.3) # 0.6s * 100 = 60 seconds
-        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {30 - int(percent_complete*0.3)}s")
+        time.sleep(0.6) # 0.6s * 100 = 60 seconds
+        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {60 - int(percent_complete*0.6)}s")
 live_ui()
