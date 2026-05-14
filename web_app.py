@@ -435,11 +435,38 @@ def live_ui():
 
     active_now = st.session_state.run_bot and not bot_reason
 
-    m1, m2, m3 = st.columns(3)
+        # --- CALCULATE TOTAL PORTFOLIO LIFETIME PNL ---
+    try:
+        # Pull latest active positions to extract real-time valuation sums
+        all_live_positions = trading_client.get_all_positions()
+        total_portfolio_pnl = sum(float(getattr(pos, 'unrealized_pl', 0.0)) for pos in all_live_positions)
+    except Exception:
+        total_portfolio_pnl = 0.0 # Default fallback if API disconnects
+
+    # Dynamically structure layout colors and prefixes for the metric card
+    tot_pnl_color = "normal" if total_portfolio_pnl >= 0 else "inverse"
+    tot_pnl_prefix = "+" if total_portfolio_pnl >= 0 else ""
+
+    # Expand layout schema from 3 columns to 4 columns to house the new total portfolio card
+    m1, m_tot, m2, m3 = st.columns([1, 1, 1, 1.2])
+
     m1.metric("Daily PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
+
+    # Render the new Total Portfolio Performance Metric Card
+    m_tot.metric(
+        label="Total Portfolio PnL", 
+        value=f"{tot_pnl_prefix}${total_portfolio_pnl:,.2f}",
+        delta=f"{total_portfolio_pnl:,.2f} Lifetime",
+        delta_color=tot_pnl_color
+    )
+
     m2.metric("Market Status", "OPEN" if market_open else "CLOSED")
-    if bot_reason: m3.error(f"🛑 {bot_reason}")
-    else: m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
+
+    if bot_reason: 
+        m3.error(f"🛑 {bot_reason}")
+    else: 
+        m3.success("🟢 BOT ACTIVE" if st.session_state.run_bot else "⚪ STANDBY")
+
 
     # Positions
     st.subheader("📊 Active Positions")
