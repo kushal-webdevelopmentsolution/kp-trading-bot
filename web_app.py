@@ -291,6 +291,74 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
     except Exception as e:
         st.error(f"Trade Failed: {e}")
 
+def get_pending_orders_df(trading_client):
+    """Fetches open/pending orders and converts them into a formatted Pandas DataFrame."""
+    try:
+        # Request only 'open' (pending) orders from Alpaca
+        filter_request = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        open_orders = trading_client.get_orders(filter=filter_request)
+
+        if not open_orders:
+            return pd.DataFrame() # Return empty dataframe if no orders pending
+
+        # Parse relevant attributes into rows
+        order_data = []
+        for order in open_orders:
+            order_data.append({
+                "Symbol": order.symbol.upper(),
+                "Side": order.side.value.upper(),
+                "Qty": float(order.qty) if order.qty else 0,
+                "Type": order.type.value,
+                "Limit Price": float(order.limit_price) if order.limit_price else None,
+                "Stop Price": float(order.stop_price) if order.stop_price else None,
+                "Status": order.status.value,
+                "Created At": order.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+        return pd.DataFrame(order_data)
+    except Exception as e:
+        st.error(f"Error fetching orders: {e}")
+        return pd.DataFrame()
+
+def get_trade_history_df(trading_client, limit=50, start_date=None, end_date=None):
+    """Fetches closed/filled orders and converts them into a Pandas DataFrame."""
+    try:
+        # Convert date objects directly to ISO string formats accepted by Alpaca to avoid namespace bugs
+        api_start = f"{start_date}T00:00:00Z" if start_date else None
+        api_end = f"{end_date}T23:59:59Z" if end_date else None
+
+        # Request closed orders with date boundary parameters
+        filter_request = GetOrdersRequest(
+            status=QueryOrderStatus.CLOSED, 
+            limit=limit,
+            after=api_start,
+            until=api_end
+        )
+        closed_orders = trading_client.get_orders(filter=filter_request)
+
+        if not closed_orders:
+            return pd.DataFrame() # Return empty if history is blank
+
+        history_data = []
+        for order in closed_orders:
+            # We filter for 'filled' status to only show successful historical trades
+            if order.status.value == "filled":
+                history_data.append({
+                    "Symbol": order.symbol.upper(),
+                    "Side": order.side.value.upper(),
+                    "Filled Qty": float(order.filled_qty) if order.filled_qty else 0,
+                    "Avg Price": float(order.filled_avg_price) if order.filled_avg_price else 0.0,
+                    "Total Value": round(float(order.filled_qty) * float(order.filled_avg_price), 2) if order.filled_qty and order.filled_avg_price else 0.0,
+                    "Type": order.type.value,
+                    "Execution Time": order.filled_at.strftime("%Y-%m-%d %H:%M:%S") if order.filled_at else "N/A"
+                })
+
+        return pd.DataFrame(history_data)
+    except Exception as e:
+        st.error(f"Error fetching trade history: {e}")
+        return pd.DataFrame()
+
+
 
 
 # --- 5. DASHBOARD UI ---
@@ -359,10 +427,47 @@ def live_ui():
                     # LONG: Lose money if price falls (Current - Entry)
                     current_pnl_pct = ((current_price - avg_entry) / avg_entry) * 100
 
+                # --- SELL ORDER PLACE CHECK & BYPASS ---
+                is_sell_placed = False
+
+                try:
+                    # Check 1: Inspect Open Orders (Waiting to execute)
+                    open_filter = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[p.symbol])
+                    open_orders = trading_client.get_orders(filter=open_filter)
+
+                    for order in open_orders:
+                        # Normalize side to string for comparison
+                        ord_side = (order.side.value if hasattr(order.side, 'value') else str(order.side)).lower()
+                        if ord_side == "sell":
+                            is_sell_placed = True
+                            add_log(f"⏭️ Bypass: An open SELL order already exists for {p.symbol}")
+                            break
+
+                    # Check 2: If no open sell order, inspect Closed/Filled Orders from today
+                    if not is_sell_placed:
+                        closed_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[p.symbol], limit=10)
+                        closed_orders = trading_client.get_orders(filter=closed_filter)
+
+                        for order in closed_orders:
+                            ord_side = (order.side.value if hasattr(order.side, 'value') else str(order.side)).lower()
+                            # If a sell order was filled or is processing, mark as placed to avoid double execution
+                            if ord_side == "sell" and order.status in ["new","filled", "partially_filled", "calculated"]:
+                                is_sell_placed = True
+                                add_log(f"⏭️ Bypass: A SELL order was already executed today for {p.symbol}")
+                                break
+
+                except Exception as check_err:
+                    add_log(f"⚠️ Order history check failed for {p.symbol}: {check_err}")
+
+
                 # If PnL drops below your trailing threshold (e.g., -2.0%)
-                if current_pnl_pct <= -st.session_state.trailing_pct:
+                if current_pnl_pct <= -st.session_state.trailing_pct and not is_sell_placed:
                     # Determine Order Side: Shorts must BUY to cover; Longs must SELL
-                    order_side = OrderSide.BUY if p_side == 'short' else OrderSide.SELL
+                    # Extracts the string value and normalizes it to lowercase for safety
+                    p_side_str = (p_side.value if hasattr(p_side, 'value') else str(p_side)).strip().lower()
+
+                    # Alpaca expects raw lowercase strings ('buy' or 'sell') for the side parameter
+                    order_side = "buy" if p_side_str == 'short' else "sell"
 
                     trading_client.submit_order(LimitOrderRequest(
                         symbol=p.symbol, 
@@ -372,7 +477,10 @@ def live_ui():
                         time_in_force=TimeInForce.DAY, 
                         extended_hours=True
                     ))
-                    add_log(f"🌙 After-Hours Stop Triggered ({p_side.upper()}): {p.symbol} at {current_price}")
+                    add_log(f"🌙 After-Hours Stop Triggered ({p_side_str.upper()}): {p.symbol} at {current_price}")
+                # Optional: Log a message if the PnL breached but it was bypassed due to an existing order
+                elif current_pnl_pct <= -st.session_state.trailing_pct and is_sell_placed:
+                    add_log(f"⏭️ Bypassed execution for {p.symbol}: PnL threshold breached but a SELL order is already active.")
             # --- END VIRTUAL MONITORING LOGIC ---
 
             # --- START EXISTING UI CODE ---
@@ -424,15 +532,28 @@ def live_ui():
             ai_dir, ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
             price = float(df['close'].iloc[-1])
 
+            # --- START 24H MARKET STATUS CHECK ---
+            try:
+                # Query Alpaca assets framework to extract trading attributes
+                asset_info = data_client.get_asset(s)
+                # Append green indicator badge if overnight_tradable is listed in assets features
+                if asset_info and hasattr(asset_info, "attributes") and "overnight_tradable" in asset_info.attributes:
+                    market_badge = " :green[[24H]] "
+                else:
+                    market_badge = " :gray[[Reg]] "
+            except Exception:
+                market_badge = " "  # Fallback gracefully if asset mapping fails
+            # --- END 24H MARKET STATUS CHECK ---
+
             # Layout columns
             s1, s2, s3, s4, s5 = st.columns([1, 1, 1.5, 2, 1])
 
             # s1.write(f"**{s}**")
             p_count = pending_counts.get(s, 0)
             if p_count > 0:
-                s1.write(f"**{s}** :orange[({p_count} Pending)]")
+                s1.write(f"**{s}** {market_badge}:orange[({p_count} Pending)]")
             else:
-                s1.write(f"**{s}**")
+                s1.write(f"**{s}** {market_badge}")
 
             # 1. VISUAL CONFIDENCE BAR
             # Colors progress based on confidence level and trade direction
@@ -571,23 +692,91 @@ def live_ui():
             st.error(f"Error loading {s}: {e}")
             continue
 
-    # --- TRADE HISTORY TABLE ---
-    st.divider()
-    st.subheader("📜 Trade History")
-    if st.session_state.logs:
-        # Parsing log strings into a dataframe for visual table
-        history_data = []
-        for line in reversed(st.session_state.logs):
-            if "|" in line:
-                ts, msg = line.split(" | ", 1)
-                history_data.append({"Time": ts, "Activity": msg})
+    # --- PENDING ORDERS DASHBOARD TAB/ROW ---
+    st.markdown("---")
+    st.subheader("📋 Active Pending Orders")
 
-        st.table(history_data[:15]) # Display last 15 actions
+    # Fetch current pending data
+    pending_df = get_pending_orders_df(trading_client) # Pass your active Alpaca trading client instance
 
-        # CSV Export
-        csv = pd.DataFrame(history_data).to_csv(index=False).encode('utf-8')
-        st.download_button(label="📥 Export History (CSV)", data=csv, file_name="trade_history.csv", mime="text/csv")
+    if not pending_df.empty:
+        # Display an interactive, sortable UI table
+        st.dataframe(
+            pending_df, 
+            use_container_width=True, 
+            hide_index=True
+        )
+    else:
+        st.info("No active pending orders found.")
+
+
+
+
+    # --- TRADE HISTORY DASHBOARD SECTION WITH FILTERS ---
     st.divider()
+    st.subheader("📜 Trade History (Filled Orders Only)")
+
+    # Create UI layout rows for the data filters
+    f_col1, f_col2, f_col3 = st.columns([1, 1.5, 1])
+
+    with f_col1:
+        # Text input search box for symbols
+        search_symbol = st.text_input("🔍 Search Symbol", value="").strip().upper()
+
+    with f_col2:
+        # Decouple native references by pulling fresh datetime boundaries locally
+        import datetime as ui_dt
+        current_now = ui_dt.datetime.now()
+        thirty_days_ago = current_now - ui_dt.timedelta(days=30)
+
+        # Date range selector window
+        date_range = st.date_input(
+            "📅 Execution Date Range", 
+            value=[thirty_days_ago.date(), current_now.date()]
+        )
+
+    # Safely split dates if a full range selection exists
+    start_dt, end_dt = None, None
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start_dt, end_dt = date_range[0], date_range[1]
+
+    # Fetch the raw historical dataset matching the date range boundaries
+    history_df = get_trade_history_df(trading_client, limit=100, start_date=start_dt, end_date=end_dt)
+
+    if not history_df.empty:
+        # Client-side processing: Filter the resulting dataframe matches for symbols dynamically
+        if search_symbol:
+            history_df = history_df[history_df["Symbol"] == search_symbol]
+
+        # Re-verify that data items remain after applying user text match filters
+        if not history_df.empty:
+            with f_col3:
+                st.write("") # Layout spacer alignment padding 
+                st.write("") 
+                # Convert the currently active filtered dataset state into export files
+                csv_bytes = history_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Export Filtered (CSV)", 
+                    data=csv_bytes, 
+                    file_name="filtered_trade_history.csv", 
+                    mime="text/csv",
+                    key="btn_export_filtered_history"
+                )
+
+            # Render the interactive UI table matching your specifications
+            st.dataframe(
+                history_df,
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info(f"No completed records found matching the symbol '{search_symbol}'.")
+    else:
+        st.info("No completed filled orders found in the selected date window.")
+    st.divider()
+
+
+
     # Add this right after the progress bar in your loop
     with st.expander(f"🔍 Why {s}?"):
         if feat_map:
