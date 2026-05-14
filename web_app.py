@@ -125,7 +125,7 @@ with st.sidebar:
     st.sidebar.markdown("### 🛡️ System Risk Settings")
     # Calibrated specifically to track VIXY daily percentage spike metrics
     cfg_vix_max = st.sidebar.slider("Max VIXY Daily Spike %", 5.0, 30.0, 10.0, 0.5, disabled=admin_disabled)
-    cfg_index_drop = st.sidebar.slider("Max Index Daily Drop %", -10.0, -1.0, -5.0, 0.1, , disabled=admin_disabled)
+    cfg_index_drop = st.sidebar.slider("Max Index Daily Drop %", -10.0, -1.0, -5.0, 0.1, disabled=admin_disabled)
 
 
     # Manual Override Checkbox to completely force-ignore circuit breaker shutdowns
