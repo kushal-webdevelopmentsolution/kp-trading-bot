@@ -17,7 +17,7 @@ import xgboost as xgb
 from alpaca.trading.requests import GetOrdersRequest
 # Add Sort to your imports at the top of your file
 from alpaca.trading.enums import OrderClass, QueryOrderStatus
-
+from zoneinfo import ZoneInfo
 
 # --- 1. CONFIG & CLIENTS ---
 try:
@@ -56,7 +56,7 @@ def add_log(msg):
         f.write(formatted_msg + "\n")
 
 def init_session_state():
-    defaults = {"tickers": ["SPY", "QQQ", "NVDA"], "run_bot": False, "order_mode": "USD", 
+    defaults = {"tickers": ["SPY", "QQQ", "NVDA", "WMI","FDVV"], "run_bot": False, "order_mode": "USD", 
                 "order_val": 1000.0, "trailing_pct": 2.0, "profit_target": 5.0, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5.0,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
@@ -375,10 +375,11 @@ def get_trade_history_df(trading_client, limit=50, start_date=None, end_date=Non
 # --- 5. DASHBOARD UI ---
 st.title("🚀 AI Alpha Terminal")
 
-@st.fragment(run_every=60)
+@st.fragment(run_every=30)
 def live_ui():
-    now_dt = datetime.now()
-    last_refresh = now_dt.strftime("%I:%M:%S %p")
+    # Fetch current time localized explicitly to the Central Time Zone
+    now_dt = datetime.now(ZoneInfo("America/Chicago"))
+    last_refresh = now_dt.strftime("%I:%M:%S %p CST")
 
     # 2. Display Header
     t1, t2 = st.columns([1, 1])
@@ -945,21 +946,25 @@ def live_ui():
         search_symbol = st.text_input("🔍 Search Symbol", value="").strip().upper()
 
     with f_col2:
-        # Decouple native references by pulling fresh datetime boundaries locally
+        # Decouple native references by forcing the Central Timezone (CST/CDT)
         import datetime as ui_dt
-        current_now = ui_dt.datetime.now()
+
+        # Pull current moment localized explicitly to Chicago/Central time
+        current_now = ui_dt.datetime.now(ZoneInfo("America/Chicago"))
         thirty_days_ago = current_now - ui_dt.timedelta(days=30)
 
-        # Date range selector window
+        # Date range selector window using localized date objects
         date_range = st.date_input(
-            "📅 Execution Date Range", 
+            "📅 Execution Date Range (CST)", 
             value=[thirty_days_ago.date(), current_now.date()]
         )
 
-    # Safely split dates if a full range selection exists
+    # --- FIXED TRANSITIONAL DATE PARSING ---
     start_dt, end_dt = None, None
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start_dt, end_dt = date_range[0], date_range[1]
+    if isinstance(date_range, (list, tuple)) and len(date_range) > 0:
+        start_dt = date_range[0]
+        end_dt = date_range[1] if len(date_range) == 2 else date_range[0]
+    # --- END FIXED TRANSITIONAL DATE PARSING ---
 
     # Fetch the raw historical dataset matching the date range boundaries
     history_df = get_trade_history_df(trading_client, limit=100, start_date=start_dt, end_date=end_dt)
@@ -997,7 +1002,6 @@ def live_ui():
     st.divider()
 
 
-
     # Add this right after the progress bar in your loop
     with st.expander(f"🔍 Why {s}?"):
         if feat_map:
@@ -1005,6 +1009,6 @@ def live_ui():
             st.bar_chart(f_df.set_index('Factor'), horizontal=True, height=200)
 
     for percent_complete in range(100):
-        time.sleep(0.6) # 0.6s * 100 = 60 seconds
-        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {60 - int(percent_complete*0.6)}s")
+        time.sleep(0.3) # 0.6s * 100 = 60 seconds
+        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {30 - int(percent_complete*0.3)}s")
 live_ui()
