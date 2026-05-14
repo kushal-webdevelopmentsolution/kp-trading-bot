@@ -307,15 +307,6 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
             ))
         else:
             # ====================================================================================
-            # 1. Submit the clean, standalone entry limit order for the extended hours session
-            trading_client.submit_order(LimitOrderRequest(
-                symbol=s, 
-                qty=qty, 
-                limit_price=price, 
-                side=side.value, 
-                time_in_force=TimeInForce.DAY, 
-                extended_hours=True
-            ))
 
             # 2. Submit parallel OCO exit triggers linked directly on the exchange servers
             # Because stop orders are blocked after hours, the SL is handled as a standard limit order
