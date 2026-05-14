@@ -574,6 +574,15 @@ def live_ui():
             live_ticker_price = float(p.current_price) if hasattr(p, 'current_price') else 0.0
             # --- END CURRENT PRICE FETCH ---
 
+            # --- START FULL ASSET NAME FETCH ---
+            # Connect to the master assets profile directory to pull the text name mapping
+            try:
+                asset_details = trading_client.get_asset(p.symbol)
+                full_asset_name = asset_details.name if asset_details and hasattr(asset_details, 'name') else "Unknown Asset"
+            except Exception:
+                full_asset_name = "US Equity Profile"  # Fallback if API rate limits or network drops
+            # --- END FULL ASSET NAME FETCH ---
+
             # Dynamic UI based on Side
             current_side = getattr(p, 'side', 'long').lower()
             side_icon = "🔴" if current_side == 'short' else "🟢"
