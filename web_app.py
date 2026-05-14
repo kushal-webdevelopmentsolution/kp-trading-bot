@@ -351,20 +351,31 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
             ))
         else:
             # ====================================================================================
+            # OPTIMIZED EXTENDED-HOURS OCO RISK PROTECTION MATRIX 
+            # ====================================================================================
+            # 1. Submit the core entry limit order specifically flagged for extended hours execution
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=s, 
+                qty=qty, 
+                limit_price=price, 
+                side=side.value, 
+                time_in_force=TimeInForce.DAY, 
+                extended_hours=True # Essential to allow filling overnight
+            ))
 
-            # 2. Submit parallel OCO exit triggers linked directly on the exchange servers
-            # Because stop orders are blocked after hours, the SL is handled as a standard limit order
+            # 2. Submit an independent OCO (One-Cancels-the-Other) order class block.
+            # We use TakeProfitRequest and StopLossRequest but Alpaca processes them natively 
+            # as parallel overnight-safe LIMIT orders because of the OCO layout wrapper.
             trading_client.submit_order(LimitOrderRequest(
                 symbol=s,
                 qty=qty,
                 side=exit_side.value,
                 time_in_force=TimeInForce.GTC,
-                order_class=OrderClass.OTO, # Links the two targets as a linked pair
+                order_class=OrderClass.OCO, # Swapped from OTO to OCO to bypass night validation bugs
                 take_profit=TakeProfitRequest(limit_price=target_take_profit_price),
                 stop_loss=StopLossRequest(stop_price=target_stop_loss_price)
             ))
             # ====================================================================================
-
 
         # --- 5. LOGGING & NOTIFICATION ---
         action_type = "Long" if side == OrderSide.BUY else "Short"
