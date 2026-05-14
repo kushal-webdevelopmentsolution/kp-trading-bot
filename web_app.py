@@ -315,7 +315,7 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 qty=qty,
                 side=exit_side.value,
                 time_in_force=TimeInForce.GTC,
-                order_class=OrderClass.OCO, # Links the two targets as a linked pair
+                order_class=OrderClass.OTO, # Links the two targets as a linked pair
                 take_profit=TakeProfitRequest(limit_price=target_take_profit_price),
                 stop_loss=StopLossRequest(stop_price=target_stop_loss_price)
             ))
