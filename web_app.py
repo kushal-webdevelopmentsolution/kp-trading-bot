@@ -723,8 +723,8 @@ def live_ui():
             # Fetch data (ensure IEX feed for free tier or SIP for paid)
             df = data_client.get_stock_bars(StockBarsRequest(
                 symbol_or_symbols=s, 
-                timeframe=TimeFrame.Day, 
-                start=datetime.now()-timedelta(days=365), 
+                timeframe=TimeFrame.Minutes, 
+                start=datetime.now()-timedelta(days=5), 
                 feed=DataFeed.IEX
             )).df.reset_index()
 
