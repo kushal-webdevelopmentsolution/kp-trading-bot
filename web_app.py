@@ -480,8 +480,10 @@ def live_ui():
         # --- START TABLE COLUMNS HEADER ---
         # Define header row outside or at the start of your positions iteration block
         # FIXED: Expanded layouts matrix from 6 to 7 columns to allocate room for Current Price
-        h1, h_price, h2, h3, h_tot, h_day, h4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
+        #h1, h_price, h2, h3, h_tot, h_day, h4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
+        h1, h_name, h_price, h2, h3, h_tot, h_day, h4 = st.columns([1, 1.8, 1, 1, 1, 1.2, 1.2, 0.5])
         h1.markdown("**Symbol**")
+        h_name.markdown("**Asset Name**") # New Column Header
         h_price.markdown("**Current Price**") # New Column Header
         h2.markdown("**Market Value**")
         h3.markdown("**PnL %**")
