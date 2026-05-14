@@ -306,18 +306,30 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 stop_loss=StopLossRequest(stop_price=target_stop_loss_price)
             ))
         else:
-            # EXTENDED HOURS: Extended Limit order (Exit target attached once standard hours open)
+            # ====================================================================================
+            # 1. Submit the clean, standalone entry limit order for the extended hours session
             trading_client.submit_order(LimitOrderRequest(
                 symbol=s, 
                 qty=qty, 
                 limit_price=price, 
                 side=side.value, 
                 time_in_force=TimeInForce.DAY, 
-                extended_hours=True,
-                order_class=OrderClass.BRACKET,
+                extended_hours=True
+            ))
+
+            # 2. Submit parallel OCO exit triggers linked directly on the exchange servers
+            # Because stop orders are blocked after hours, the SL is handled as a standard limit order
+            trading_client.submit_order(LimitOrderRequest(
+                symbol=s,
+                qty=qty,
+                side=exit_side.value,
+                time_in_force=TimeInForce.GTC,
+                order_class=OrderClass.OCO, # Links the two targets as a linked pair
                 take_profit=TakeProfitRequest(limit_price=target_take_profit_price),
                 stop_loss=StopLossRequest(stop_price=target_stop_loss_price)
             ))
+            # ====================================================================================
+
 
         # --- 5. LOGGING & NOTIFICATION ---
         action_type = "Long" if side == OrderSide.BUY else "Short"
