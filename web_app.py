@@ -435,33 +435,36 @@ def live_ui():
 
     active_now = st.session_state.run_bot and not bot_reason
 
-        # --- CALCULATE TOTAL PORTFOLIO LIFETIME PNL ---
+        # --- FETCH ACCOUNT VALUE AND BUYING POWER METRICS ---
     try:
-        # Pull latest active positions to extract real-time valuation sums
-        all_live_positions = trading_client.get_all_positions()
-        total_portfolio_pnl = sum(float(getattr(pos, 'unrealized_pl', 0.0)) for pos in all_live_positions)
+        # Pull real-time account data from Alpaca
+        acct_profile = trading_client.get_account()
+
+        # 'cash' or 'buying_power' represents what is available to deploy immediately
+        avail_balance = float(acct_profile.cash)
+
+        # 'equity' represents the sum of your cash plus current market values of positions
+        portfolio_value = float(acct_profile.equity)
     except Exception:
-        total_portfolio_pnl = 0.0 # Default fallback if API disconnects
+        avail_balance = 0.0
+        portfolio_value = 0.0
 
-    # Dynamically structure layout colors and prefixes for the metric card
-    tot_pnl_color = "normal" if total_portfolio_pnl >= 0 else "inverse"
-    tot_pnl_prefix = "+" if total_portfolio_pnl >= 0 else ""
+    # Expand column template boundaries to a 5-column layout matrix
+    m1, m_bal, m_port, m2, m3 = st.columns([1, 1, 1, 1, 1.2])
 
-    # Expand layout schema from 3 columns to 4 columns to house the new total portfolio card
-    m1, m_tot, m2, m3 = st.columns([1, 1, 1, 1.2])
-
+    # 1. Core performance tracking metric
     m1.metric("Daily PnL", f"${daily_pnl:.2f}", delta=f"{daily_pnl:.2f}")
 
-    # Render the new Total Portfolio Performance Metric Card
-    m_tot.metric(
-        label="Total Portfolio PnL", 
-        value=f"{tot_pnl_prefix}${total_portfolio_pnl:,.2f}",
-        delta=f"{total_portfolio_pnl:,.2f} Lifetime",
-        delta_color=tot_pnl_color
-    )
+    # 2. Display available cash spending balance card
+    m_bal.metric("Available Balance", f"${avail_balance:,.2f}")
 
+    # 3. Display total net equity value card
+    m_port.metric("Portfolio Value", f"${portfolio_value:,.2f}")
+
+    # 4. Exchange operations schedule monitor
     m2.metric("Market Status", "OPEN" if market_open else "CLOSED")
 
+    # 5. Strategic status gate checks
     if bot_reason: 
         m3.error(f"🛑 {bot_reason}")
     else: 
