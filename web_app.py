@@ -677,19 +677,6 @@ def live_ui():
             ai_dir, ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
             price = float(df['close'].iloc[-1])
 
-            # --- START 24H MARKET STATUS CHECK ---
-            try:
-                # Query Alpaca assets framework to extract trading attributes
-                asset_info = data_client.get_asset(s)
-                # Append green indicator badge if overnight_tradable is listed in assets features
-                if asset_info and hasattr(asset_info, "attributes") and "overnight_tradable" in asset_info.attributes:
-                    market_badge = " :green[[24H]] "
-                else:
-                    market_badge = " :gray[[Reg]] "
-            except Exception:
-                market_badge = " "  # Fallback gracefully if asset mapping fails
-            # --- END 24H MARKET STATUS CHECK ---
-
             # --- START CACHED NAME LOOKUP FOR WATCHLIST SYMBOL ---
             if "cached_asset_names" not in st.session_state:
                 st.session_state["cached_asset_names"] = {}
@@ -714,12 +701,12 @@ def live_ui():
             # s1.write(f"**{s}**")
             p_count = pending_counts.get(s, 0)
             if p_count > 0:
-                s1.write(f"**{s}** {market_badge}:orange[({p_count} Pending)]")
+                s1.write(f"**{s}** :orange[({p_count} Pending)]")
             else:
-                s1.write(f"**{s}** {market_badge}")
+                s1.write(f"**{s}** ")
 
             # Render the cached company description asset name string
-            s_name.write(f"{full_asset_name}")
+            s_name.write(f"**{full_asset_name}**")
 
             # 1. VISUAL CONFIDENCE BAR
             # Colors progress based on confidence level and trade direction
