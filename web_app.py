@@ -409,6 +409,18 @@ def live_ui():
     clock = trading_client.get_clock()
     held_symbols = {p.symbol for p in pos} # Essential for auto-execution check
     if pos:
+        # --- START TABLE COLUMNS HEADER ---
+        # Define header row outside or at the start of your positions iteration block
+        # Ensure the column layout sizing definitions exactly match your dynamic data rows below
+        h1, h2, h3, h_tot, h_day, h4 = st.columns([1, 1, 1, 1.2, 1.2, 0.5])
+        h1.markdown("**Symbol**")
+        h2.markdown("**Market Value**")
+        h3.markdown("**PnL %**")
+        h_tot.markdown("**Total Gain**")
+        h_day.markdown("**Daily Gain**")
+        h4.markdown("**Close**")
+        st.divider() # Creates a clean separation line under the headers
+        # --- END TABLE COLUMNS HEADER ---
         # Loop through positions to handle UI and Virtual Monitoring
         for p in pos:
             # --- START VIRTUAL MONITORING LOGIC ---
@@ -451,7 +463,7 @@ def live_ui():
                         for order in closed_orders:
                             ord_side = (order.side.value if hasattr(order.side, 'value') else str(order.side)).lower()
                             # If a sell order was filled or is processing, mark as placed to avoid double execution
-                            if ord_side == "sell" and order.status in ["new","filled", "partially_filled", "calculated"]:
+                            if ord_side == "sell" and order.status in ["filled", "partially_filled", "calculated"]:
                                 is_sell_placed = True
                                 add_log(f"⏭️ Bypass: A SELL order was already executed today for {p.symbol}")
                                 break
@@ -491,16 +503,40 @@ def live_ui():
             side_icon = "🔴" if current_side == 'short' else "🟢"
             pnl_color = "red" if pnl_pct < 0 else "green"
 
-            c1, c2, c3, c4 = st.columns([1, 1, 1, 0.5])
+            # --- START GAIN CALCULATIONS ---
+            # Fetch total and daily dollar profit/loss from Alpaca properties
+            total_gain = float(getattr(p, 'unrealized_pl', 0.0))
+            daily_gain = float(getattr(p, 'unrealized_intraday_pl', 0.0))
+
+            # Dynamically assign styling colors based on profit values
+            tot_color = "red" if total_gain < 0 else "green"
+            day_color = "red" if daily_gain < 0 else "green"
+
+            # Create formatting prefix strings (+ or -)
+            tot_prefix = "+" if total_gain >= 0 else ""
+            day_prefix = "+" if daily_gain >= 0 else ""
+            # --- END GAIN CALCULATIONS ---
+
+            # Layout columns adjusted to safely fit the new performance columns
+            c1, c2, c3, c_tot, c_day, c4 = st.columns([1, 1, 1, 1.2, 1.2, 0.5])
+
             c1.write(f"{side_icon} **{p.symbol}**")
             c2.write(f"${mkt_val:,.0f}")
+
             # Styled PnL for better visibility
             c3.markdown(f":{pnl_color}[{pnl_pct:.2f}%]")
+
+            # 1. Display total overall gain column
+            c_tot.markdown(f":{tot_color}[{tot_prefix}${total_gain:,.2f}]")
+
+            # 2. Display daily dynamic intraday gain column
+            c_day.markdown(f":{day_color}[{day_prefix}${daily_gain:,.2f}]")
 
             if c4.button("✖", key=f"cl_{p.symbol}"):
                 trading_client.close_position(p.symbol)
                 add_log(f"Manual Close: {p.symbol}")
                 st.rerun()
+
             # --- END EXISTING UI CODE ---
     else:
         st.info("No active positions.")
@@ -774,7 +810,6 @@ def live_ui():
     else:
         st.info("No completed filled orders found in the selected date window.")
     st.divider()
-
 
 
     # Add this right after the progress bar in your loop
