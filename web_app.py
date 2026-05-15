@@ -60,7 +60,7 @@ def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA", "WMI","FDVV"], "run_bot": False, "order_mode": "USD", 
                 "order_val": 1000.0, "trailing_pct": 2.0, "profit_target": 5.0, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5.0,
-                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False,"profit_target":2.0,"bot_active": False}
+                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False,"profit_target":2.0}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f: defaults.update(json.load(f))
