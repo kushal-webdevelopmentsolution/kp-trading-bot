@@ -218,9 +218,10 @@ def get_ai_prediction(df, symbol):
         # --- MULTI-BAR LOOKAHEAD ENGINE ---
         LOOKAHEAD_BARS = 5 
 
-        # Invert data to look into the future with rolling windows
-        future_highest_close = df['close'].[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).max().[::-1]
-        future_lowest_close = df['close'].[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).min().[::-1]
+        # FIXED SYNTAX: Isolate the close column first, then apply the reverse slicing operations
+        close_series = df['close']
+        future_highest_close = close_series[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).max()[::-1]
+        future_lowest_close = close_series[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).min()[::-1]
 
         # Shift ahead by -1 so the current bar doesn't look at itself
         future_max = future_highest_close.shift(-1)
