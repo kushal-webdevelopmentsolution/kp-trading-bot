@@ -215,12 +215,35 @@ def get_ai_prediction(df, symbol):
         df.ta.bbands(append=True); df.ta.mfi(append=True)
         df['VOL_SMA'] = ta.sma(df['volume'], length=20) 
 
+        # --- MULTI-BAR LOOKAHEAD ENGINE ---
+        LOOKAHEAD_BARS = 5 
+
+        # Invert data to look into the future with rolling windows
+        future_highest_close = df['close'].[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).max().[::-1]
+        future_lowest_close = df['close'].[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).min().[::-1]
+
+        # Shift ahead by -1 so the current bar doesn't look at itself
+        future_max = future_highest_close.shift(-1)
+        future_min = future_lowest_close.shift(-1)
+
         # Multi-Class Target (1=Long, 2=Short, 0=Neutral)
         df['target'] = 0
-        df.loc[df['close'].shift(-1) > df['close'] * 1.0015, 'target'] = 1
-        df.loc[df['close'].shift(-1) < df['close'] * 0.9985, 'target'] = 2
+        df.loc[future_max > df['close'] * 1.0015, 'target'] = 1
+        df.loc[future_min < df['close'] * 0.9985, 'target'] = 2
+
+        # Conflict Reconciliation if both thresholds are crossed within the lookahead window
+        both_hit = (future_max > df['close'] * 1.0015) & (future_min < df['close'] * 0.9985)
+        long_distance = future_max - df['close']
+        short_distance = df['close'] - future_min
+
+        df.loc[both_hit & (long_distance >= short_distance), 'target'] = 1
+        df.loc[both_hit & (short_distance > long_distance), 'target'] = 2
 
         df = df.ffill().dropna()
+
+        # Drop incomplete edge records at the end of the dataframe to prevent training lookahead leakage
+        if len(df) > LOOKAHEAD_BARS:
+            df = df.iloc[:-LOOKAHEAD_BARS]
 
         feature_keywords = ['RSI', 'MACD', 'ADX', 'EMA', 'ATR', 'BBL', 'BBU', 'MFI', 'volume', 'VOL_SMA']
         features = [c for c in df.columns if any(x in c for x in feature_keywords)]
