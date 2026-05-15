@@ -215,12 +215,36 @@ def get_ai_prediction(df, symbol):
         df.ta.bbands(append=True); df.ta.mfi(append=True)
         df['VOL_SMA'] = ta.sma(df['volume'], length=20) 
 
+        # --- MULTI-BAR LOOKAHEAD ENGINE ---
+        LOOKAHEAD_BARS = 5 
+
+        # Isolate the close column first, then apply the reverse slicing operations
+        close_series = df['close']
+        future_highest_close = close_series[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).max()[::-1]
+        future_lowest_close = close_series[::-1].rolling(window=LOOKAHEAD_BARS, min_periods=1).min()[::-1]
+
+        # Shift ahead by -1 so the current bar doesn't look at itself
+        future_max = future_highest_close.shift(-1)
+        future_min = future_lowest_close.shift(-1)
+
         # Multi-Class Target (1=Long, 2=Short, 0=Neutral)
         df['target'] = 0
-        df.loc[df['close'].shift(-1) > df['close'] * 1.0015, 'target'] = 1
-        df.loc[df['close'].shift(-1) < df['close'] * 0.9985, 'target'] = 2
+        df.loc[future_max > df['close'] * 1.0015, 'target'] = 1
+        df.loc[future_min < df['close'] * 0.9985, 'target'] = 2
+
+        # Conflict Reconciliation if both thresholds are crossed within the lookahead window
+        both_hit = (future_max > df['close'] * 1.0015) & (future_min < df['close'] * 0.9985)
+        long_distance = future_max - df['close']
+        short_distance = df['close'] - future_min
+
+        df.loc[both_hit & (long_distance >= short_distance), 'target'] = 1
+        df.loc[both_hit & (short_distance > long_distance), 'target'] = 2
 
         df = df.ffill().dropna()
+
+        # Drop incomplete edge records at the end of the dataframe to prevent training lookahead leakage
+        if len(df) > LOOKAHEAD_BARS:
+            df = df.iloc[:-LOOKAHEAD_BARS]
 
         feature_keywords = ['RSI', 'MACD', 'ADX', 'EMA', 'ATR', 'BBL', 'BBU', 'MFI', 'volume', 'VOL_SMA']
         features = [c for c in df.columns if any(x in c for x in feature_keywords)]
@@ -230,45 +254,62 @@ def get_ai_prediction(df, symbol):
         brain = st.session_state.model_vault.get(symbol, {"time": 0})
 
         if (now - brain["time"]) > 3600:
+            from sklearn.preprocessing import LabelEncoder
+            le = LabelEncoder()
+
+            train_data = df.iloc[-500:] if len(df) > 500 else df
+            X, y_raw = train_data[features].iloc[:-2].copy(), train_data['target'].iloc[:-2].copy()
+
+            # Use LabelEncoder to compress classes into consecutive integers starting at 0
+            y = le.fit_transform(y_raw)
+            detected_classes = len(le.classes_)
+
             m_rf = RandomForestClassifier(n_estimators=100, max_depth=10, n_jobs=-1, random_state=42)
             m_xgb = xgb.XGBClassifier(
                 n_estimators=100, 
                 max_depth=6, 
-                objective='multi:softprob', 
-                num_class=3, 
+                objective='multi:softprob' if detected_classes > 2 else 'binary:logistic', 
+                num_class=detected_classes if detected_classes > 2 else None, 
                 tree_method='hist', 
                 n_jobs=-1
             )
-
-            train_data = df.iloc[-500:] if len(df) > 500 else df
-            # Ensure target classes 0, 1, 2 are present
-            X, y = train_data[features].iloc[:-2], train_data['target'].iloc[:-2]
 
             m_rf.fit(X, y); m_xgb.fit(X, y)
 
             st.session_state.model_vault[symbol] = {
                 "models": (m_rf, m_xgb), 
                 "time": now,
-                "importance": dict(zip(features, m_rf.feature_importances_))
+                "importance": dict(zip(features, m_rf.feature_importances_)),
+                "encoder": le # Cache the encoder to decode model inference indices later
             }
 
         # --- 4. INFERENCE ---
         active_brain = st.session_state.model_vault[symbol]
         rf_m, xgb_m = active_brain["models"]
+        le = active_brain["encoder"]
 
         last_rows = df[features].tail(10)
         p_rf = rf_m.predict_proba(last_rows)
         p_xgb = xgb_m.predict_proba(last_rows)
 
-        # Average probability (Class indices: 0=Neutral, 1=Long, 2=Short)
+        # Calculate raw average probabilities across columns
         avg_probs = (p_rf + p_xgb) / 2
-        long_probs = avg_probs[:, 1]
-        short_probs = avg_probs[:, 2]
+
+        # Reconstruct full 3-class projection maps (0, 1, 2) matching your downstream logic gates
+        long_probs = [0.0] * len(last_rows)
+        short_probs = [0.0] * len(last_rows)
+
+        # Map transformed column positions back to their true target labels
+        for position_idx, true_label in enumerate(le.classes_):
+            if true_label == 1:
+                long_probs = avg_probs[:, position_idx]
+            elif true_label == 2:
+                short_probs = avg_probs[:, position_idx]
 
         # --- 5. LOGIC GATES ---
-        mfi_col = [c for c in df.columns if 'MFI' in c][0]
-        bbu_col = [c for c in df.columns if 'BBU' in c][0]
-        bbl_col = [c for c in df.columns if 'BBL' in c][0]
+        mfi_col = [c for c in df.columns if 'MFI' in c]
+        bbu_col = [c for c in df.columns if 'BBU' in c]
+        bbl_col = [c for c in df.columns if 'BBL' in c]
 
         l_price, l_mfi = df['close'].iloc[-1], df[mfi_col].iloc[-1]
         l_ema = df['EMA_20'].iloc[-1]
