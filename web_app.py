@@ -22,8 +22,8 @@ from zoneinfo import ZoneInfo
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
-    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
+    API_KEY =  st.secrets["API_KEY"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -861,8 +861,8 @@ def live_ui():
             # Fetch data (ensure IEX feed for free tier or SIP for paid)
             df = data_client.get_stock_bars(StockBarsRequest(
                 symbol_or_symbols=s, 
-                timeframe=TimeFrame.Day, 
-                start=datetime.now()-timedelta(days=730), 
+                timeframe=TimeFrame.Minute, 
+                start=datetime.now()-timedelta(days=5), 
                 feed=DataFeed.IEX
             )).df.reset_index()
 
