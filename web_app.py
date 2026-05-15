@@ -542,7 +542,7 @@ def live_ui():
             del st.session_state["run_bot"]
 
         # 2. Reinitialize the key back to a safe, default false state
-        st.session_state["run_bot"] = False; save_settings()
+        st.session_state["run_bot"] = False; save_settings(); st.rerun()
         add_log(f"🎯 Target Hit: ${daily_pnl:.2f}. Positions closed.")
     elif l_hit and st.session_state.run_bot:
         bot_reason = "LOSS LIMIT HIT"
@@ -551,7 +551,7 @@ def live_ui():
             del st.session_state["run_bot"]
 
         # 2. Reinitialize the key back to a safe, default false state
-        st.session_state["run_bot"] = False; save_settings()
+        st.session_state["run_bot"] = False; save_settings(); st.rerun()
         add_log(f"🛑 Loss Limit Hit: ${daily_pnl:.2f}. Bot stopped.")
     elif not market_open and not st.session_state.allow_ext_hours:
         bot_reason = "MARKET CLOSED"
