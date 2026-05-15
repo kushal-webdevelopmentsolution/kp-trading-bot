@@ -862,7 +862,7 @@ def live_ui():
             df = data_client.get_stock_bars(StockBarsRequest(
                 symbol_or_symbols=s, 
                 timeframe=TimeFrame.Minute, 
-                start=datetime.now()-timedelta(days=5), 
+                start=datetime.now()-timedelta(days=14), 
                 feed=DataFeed.IEX
             )).df.reset_index()
 
