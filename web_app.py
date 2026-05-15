@@ -77,18 +77,6 @@ init_session_state()
 if "is_admin_unlocked" not in st.session_state:
         st.session_state["is_admin_unlocked"] = False
 
-if "bot_active" not in st.session_state:
-    st.session_state.bot_active = False
-
-# Callback function to sync UI changes back to the engine
-def handle_ui_toggle():
-    st.session_state.bot_active = st.session_state.run_bot
-
-# Force the UI widget key to match our backend engine BEFORE the widget runs
-st.session_state.run_bot = st.session_state.bot_active
-
-
-
 # --- 3. SIDEBAR ---
 with st.sidebar:
 
@@ -546,14 +534,14 @@ def live_ui():
     l_hit = daily_pnl <= -abs(st.session_state.daily_loss_limit)
 
     bot_reason = ""
-    if p_hit and st.session_state.bot_active:
+    if p_hit and st.session_state.run_bot:
         bot_reason = "PROFIT GOAL REACHED"
         trading_client.close_all_positions(cancel_orders=True)
-        st.session_state.bot_active = False; save_settings()
+        st.session_state.run_bot.append(False); save_settings()
         add_log(f"🎯 Target Hit: ${daily_pnl:.2f}. Positions closed.")
-    elif l_hit and st.session_state.bot_active:
+    elif l_hit and st.session_state.run_bot:
         bot_reason = "LOSS LIMIT HIT"
-        st.session_state.bot_active = False; save_settings()
+        st.session_state.run_bot.append(False); save_settings()
         add_log(f"🛑 Loss Limit Hit: ${daily_pnl:.2f}. Bot stopped.")
     elif not market_open and not st.session_state.allow_ext_hours:
         bot_reason = "MARKET CLOSED"
