@@ -22,15 +22,15 @@ from zoneinfo import ZoneInfo
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  st.secrets["API_KEY"]
-    SECRET_KEY = st.secrets["SECRET_KEY"]
+    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
+    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-st.set_page_config(page_title="AI Alpha Terminal Pro", layout="wide")
+st.set_page_config(page_title="KP-ALPHAFORGE", layout="wide")
 
 # --- 2. PERSISTENCE ENGINE ---
 SETTINGS_FILE = "settings.json"
@@ -57,7 +57,7 @@ def add_log(msg):
         f.write(formatted_msg + "\n")
 
 def init_session_state():
-    defaults = {"tickers": ["SPY", "QQQ", "NVDA", "WMI","FDVV"], "run_bot": False, "order_mode": "USD", 
+    defaults = {"tickers": ["SPY", "QQQ", "NVDA", "IWM","FDVV"], "run_bot": False, "order_mode": "USD", 
                 "order_val": 1000.0, "trailing_pct": 2.0, "profit_target": 5.0, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5.0,
                 "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False,"profit_target":2.0}
@@ -567,7 +567,26 @@ if "cached_asset_names" not in st.session_state:
 
 
 # --- 5. DASHBOARD UI ---
-st.title("🚀 AI Alpha Terminal")
+#st.title("🚀 AI Alpha Terminal")
+
+st.markdown(
+    """
+    <div style="background-color:#0f172a; padding:24px; border-radius:12px; border: 1px solid #1e293b; border-top: 5px solid #d97706; margin-bottom:25px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h1 style="color:#ffffff; margin:0; font-family:sans-serif; font-size:26px; font-weight:700; letter-spacing: 1px;">
+                    🪙 KP-ALPHAFORGE <span style="color:#d97706; font-size:13px; font-weight:600; vertical-align:super;">PRO v2.5</span>
+                </h1>
+                <p style="color:#94a3b8; margin:6px 0 0 0; font-family:sans-serif; font-size:13px; font-style:normal; letter-spacing: 0.5px;">
+                    High-Yield Automated Predictive Equity System
+                </p>
+            </div>
+        </div>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
+
 
 @st.fragment(run_every=60)
 def live_ui():
@@ -1123,6 +1142,51 @@ def live_ui():
                 elif is_market_crashing:
                     st.caption(f"🛑 Bot Blocked: Order routing blocked by multi-index crash constraints.")
 
+                # ====================================================================================
+                # 2. HIGH-DENSITY PROGRESSIVE METRIC GRID (SHOWS EXACTLY ONCE PER REFRESH CYCLE)
+                # ====================================================================================
+                if not st.session_state.get("has_shown_risk_matrix", False):
+                    st.markdown("### 📊 Market Risk Factor Metrics")
+
+                    # Create 4 columns for VIXY, SPY, QQQ, and IWM
+                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+
+                    # 1. Volatility Metric Card (VIXY Daily Percent Change vs Max Limit)
+                    with m_col1:
+                        # FIXED: vix_status is now guaranteed to exist
+                        vix_status_icon = "🟢" if "SAFE" in vix_status else "🔴"
+                        st.metric(
+                            label=f"{vix_status_icon} Volatility (VIXY)", 
+                            value=vix_chg_str, # Displays the live daily return string (e.g. +4.25%)
+                            delta=f"Max Limit: +{cfg_vix_max:.1f}%",
+                            delta_color="normal" if "SAFE" in vix_status else "inverse"
+                        )
+
+                    # 2. Extract and parse index daily performances dynamically from your data
+                    for ticker, col_target in zip(["SPY", "QQQ", "IWM"], [m_col2, m_col3, m_col4]):
+                        ticker_df = bench_data[bench_data['symbol'] == ticker]
+                        if len(ticker_df) >= 2:
+                            p_close = float(ticker_df['close'].iloc[-2])
+                            c_price = float(ticker_df['close'].iloc[-1])
+                            ret_pct = ((c_price - p_close) / p_close) * 100
+
+                            idx_icon = "🍏" if ret_pct > cfg_index_drop else "🚨"
+                            with col_target:
+                                st.metric(
+                                    label=f"{idx_icon} {ticker} Benchmark",
+                                    value=f"${c_price:,.2f}",
+                                    delta=f"{ret_pct:+.2f}% (Limit: {cfg_index_drop:+.1f}%)",
+                                    delta_color="normal" if ret_pct > cfg_index_drop else "inverse"
+                                )
+                        else:
+                            with col_target:
+                                st.metric(label=f"🔄 {ticker}", value="Loading...")
+
+                    st.markdown("---")
+                    # Flip the state flag so subsequent tickers in the loop bypass printing this container
+                    st.session_state["has_shown_risk_matrix"] = True
+                # ====================================================================================
+
 
             # --- MANUAL BUY BUTTON ---
             # if s5.button("Buy", key=f"b_{s}"):
@@ -1147,51 +1211,6 @@ def live_ui():
         except Exception as e:
             st.error(f"Error loading {s}: {e}")
             continue
-
-    # ====================================================================================
-    # HIGH-DENSITY PROGRESSIVE METRIC GRID (SHOWS EXACTLY ONCE PER REFRESH CYCLE)
-    # ====================================================================================
-    if not st.session_state.get("has_shown_risk_matrix", False):
-        st.markdown("### 📊 Market Risk Factor Metrics")
-
-        # Create 4 columns for VIXY, SPY, QQQ, and IWM
-        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-
-        # 1. Volatility Metric Card (VIXY Daily Percent Change vs Max Limit)
-        with m_col1:
-            vix_status_icon = "🟢" if "SAFE" in vix_status else "🔴"
-            st.metric(
-                label=f"{vix_status_icon} Volatility (VIXY)", 
-                value=vix_chg_str, # Displays the live daily return string (e.g. +4.25%)
-                delta=f"Max Limit: +{cfg_vix_max:.1f}%",
-                delta_color="normal" if "SAFE" in vix_status else "inverse"
-            )
-
-        # 2. Extract and parse index daily performances dynamically from your data
-        for ticker, col_target in zip(["SPY", "QQQ", "IWM"], [m_col2, m_col3, m_col4]):
-            ticker_df = bench_data[bench_data['symbol'] == ticker]
-            if len(ticker_df) >= 2:
-                p_close = float(ticker_df['close'].iloc[-2])
-                c_price = float(ticker_df['close'].iloc[-1])
-                ret_pct = ((c_price - p_close) / p_close) * 100
-
-                idx_icon = "🍏" if ret_pct > cfg_index_drop else "🚨"
-                with col_target:
-                    st.metric(
-                        label=f"{idx_icon} {ticker} Benchmark",
-                        value=f"${c_price:,.2f}",
-                        delta=f"{ret_pct:+.2f}% (Limit: {cfg_index_drop:+.1f}%)",
-                        delta_color="normal" if ret_pct > cfg_index_drop else "inverse"
-                    )
-            else:
-                with col_target:
-                    st.metric(label=f"🔄 {ticker}", value="Loading...")
-
-        st.markdown("---")
-        # Flip the state flag so subsequent tickers in the loop bypass printing this container
-        st.session_state["has_shown_risk_matrix"] = True
-    # ====================================================================================
-
 
     # --- PENDING ORDERS DASHBOARD TAB/ROW ---
     st.markdown("---")
