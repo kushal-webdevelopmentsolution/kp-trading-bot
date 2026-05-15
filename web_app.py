@@ -215,8 +215,19 @@ def get_ai_prediction(df, symbol):
         df.ta.bbands(append=True); df.ta.mfi(append=True)
         df['VOL_SMA'] = ta.sma(df['volume'], length=20) 
 
-        # --- MULTI-BAR LOOKAHEAD ENGINE ---
-        LOOKAHEAD_BARS = 5 
+        # --- UPGRADED: MULTI-BAR LOOKAHEAD & DYNAMIC ATR THRESHOLDS ---
+        LOOKAHEAD_BARS = 10  # Expanded from 5 to 10 to capture structural micro-trends
+        ATR_MULTIPLIER = 1.5 # Requires the target move to exceed 1.5x the current asset volatility
+
+        # Find the ATR column name dynamically
+        atr_col = [c for c in df.columns if 'ATR' in c][0]
+
+        # Calculate individual dynamic percent thresholds for every single row
+        # (ATR / Close) gives the volatility percentage, which we multiply by our multiplier
+        df['dynamic_threshold'] = (df[atr_col] / df['close']) * ATR_MULTIPLIER
+
+        # Prevent the threshold from dropping too low in compressed squeeze regimes (minimum 0.08%)
+        df['dynamic_threshold'] = df['dynamic_threshold'].clip(lower=0.0008)
 
         # Isolate the close column first, then apply the reverse slicing operations
         close_series = df['close']
@@ -229,11 +240,14 @@ def get_ai_prediction(df, symbol):
 
         # Multi-Class Target (1=Long, 2=Short, 0=Neutral)
         df['target'] = 0
-        df.loc[future_max > df['close'] * 1.0015, 'target'] = 1
-        df.loc[future_min < df['close'] * 0.9985, 'target'] = 2
+
+        # UPGRADED TARGETING: Replaced hardcoded 1.0015/0.9985 with the dynamic volatility band
+        df.loc[future_max > df['close'] * (1.0 + df['dynamic_threshold']), 'target'] = 1
+        df.loc[future_min < df['close'] * (1.0 - df['dynamic_threshold']), 'target'] = 2
 
         # Conflict Reconciliation if both thresholds are crossed within the lookahead window
-        both_hit = (future_max > df['close'] * 1.0015) & (future_min < df['close'] * 0.9985)
+        both_hit = (future_max > df['close'] * (1.0 + df['dynamic_threshold'])) & \
+                   (future_min < df['close'] * (1.0 - df['dynamic_threshold']))
         long_distance = future_max - df['close']
         short_distance = df['close'] - future_min
 
@@ -307,7 +321,6 @@ def get_ai_prediction(df, symbol):
                 short_probs = avg_probs[:, position_idx]
 
         # --- 5. LOGIC GATES ---
-        # FIXED: Added [0] to extract the string out of the filtered column list
         mfi_col = [c for c in df.columns if 'MFI' in c][0]
         bbu_col = [c for c in df.columns if 'BBU' in c][0]
         bbl_col = [c for c in df.columns if 'BBL' in c][0]
