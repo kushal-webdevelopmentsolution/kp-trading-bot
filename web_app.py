@@ -280,7 +280,7 @@ def get_ai_prediction(df, symbol):
                 "models": (m_rf, m_xgb), 
                 "time": now,
                 "importance": dict(zip(features, m_rf.feature_importances_)),
-                "encoder": le # Cache the encoder to decode model inference indices later
+                "encoder": le
             }
 
         # --- 4. INFERENCE ---
@@ -307,9 +307,10 @@ def get_ai_prediction(df, symbol):
                 short_probs = avg_probs[:, position_idx]
 
         # --- 5. LOGIC GATES ---
-        mfi_col = [c for c in df.columns if 'MFI' in c]
-        bbu_col = [c for c in df.columns if 'BBU' in c]
-        bbl_col = [c for c in df.columns if 'BBL' in c]
+        # FIXED: Added [0] to extract the string out of the filtered column list
+        mfi_col = [c for c in df.columns if 'MFI' in c][0]
+        bbu_col = [c for c in df.columns if 'BBU' in c][0]
+        bbl_col = [c for c in df.columns if 'BBL' in c][0]
 
         l_price, l_mfi = df['close'].iloc[-1], df[mfi_col].iloc[-1]
         l_ema = df['EMA_20'].iloc[-1]
