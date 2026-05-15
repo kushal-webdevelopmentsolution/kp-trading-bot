@@ -537,11 +537,21 @@ def live_ui():
     if p_hit and st.session_state.run_bot:
         bot_reason = "PROFIT GOAL REACHED"
         trading_client.close_all_positions(cancel_orders=True)
-        st.session_state.run_bot.append(False); save_settings()
+        # 1. Clear the active widget key from memory to break the Streamlit lock
+        if "run_bot" in st.session_state:
+            del st.session_state["run_bot"]
+
+        # 2. Reinitialize the key back to a safe, default false state
+        st.session_state["run_bot"] = False; save_settings()
         add_log(f"🎯 Target Hit: ${daily_pnl:.2f}. Positions closed.")
     elif l_hit and st.session_state.run_bot:
         bot_reason = "LOSS LIMIT HIT"
-        st.session_state.run_bot.append(False); save_settings()
+        # 1. Clear the active widget key from memory to break the Streamlit lock
+        if "run_bot" in st.session_state:
+            del st.session_state["run_bot"]
+
+        # 2. Reinitialize the key back to a safe, default false state
+        st.session_state["run_bot"] = False; save_settings()
         add_log(f"🛑 Loss Limit Hit: ${daily_pnl:.2f}. Bot stopped.")
     elif not market_open and not st.session_state.allow_ext_hours:
         bot_reason = "MARKET CLOSED"
