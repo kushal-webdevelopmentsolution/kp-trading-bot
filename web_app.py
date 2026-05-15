@@ -43,7 +43,7 @@ if "model_vault" not in st.session_state:
 def save_settings():
     keys = ["tickers", "run_bot", "order_mode", "order_val", "trailing_pct", 
             "profit_target", "ai_threshold", "vix_threshold", "lock_profit_pct", 
-            "daily_loss_limit", "global_profit_goal", "allow_ext_hours","profit_target"]
+            "daily_loss_limit", "global_profit_goal", "allow_ext_hours","profit_target","bot_active"]
     settings_data = {k: st.session_state[k] for k in keys if k in st.session_state}
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings_data, f, indent=4)
@@ -60,7 +60,7 @@ def init_session_state():
     defaults = {"tickers": ["SPY", "QQQ", "NVDA", "WMI","FDVV"], "run_bot": False, "order_mode": "USD", 
                 "order_val": 1000.0, "trailing_pct": 2.0, "profit_target": 5.0, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5.0,
-                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False,"profit_target":2.0}
+                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False,"profit_target":2.0,"bot_active": False}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f: defaults.update(json.load(f))
@@ -76,6 +76,17 @@ init_session_state()
 
 if "is_admin_unlocked" not in st.session_state:
         st.session_state["is_admin_unlocked"] = False
+
+if "bot_active" not in st.session_state:
+    st.session_state.bot_active = False
+
+# Callback function to sync UI changes back to the engine
+def handle_ui_toggle():
+    st.session_state.bot_active = st.session_state.run_bot
+
+# Force the UI widget key to match our backend engine BEFORE the widget runs
+st.session_state.run_bot = st.session_state.bot_active
+
 
 
 # --- 3. SIDEBAR ---
@@ -535,14 +546,14 @@ def live_ui():
     l_hit = daily_pnl <= -abs(st.session_state.daily_loss_limit)
 
     bot_reason = ""
-    if p_hit and st.session_state.run_bot:
+    if p_hit and st.session_state.bot_active:
         bot_reason = "PROFIT GOAL REACHED"
         trading_client.close_all_positions(cancel_orders=True)
-        st.session_state.run_bot = False; save_settings()
+        st.session_state.bot_active = False; save_settings()
         add_log(f"🎯 Target Hit: ${daily_pnl:.2f}. Positions closed.")
-    elif l_hit and st.session_state.run_bot:
+    elif l_hit and st.session_state.bot_active:
         bot_reason = "LOSS LIMIT HIT"
-        st.session_state.run_bot = False; save_settings()
+        st.session_state.bot_active = False; save_settings()
         add_log(f"🛑 Loss Limit Hit: ${daily_pnl:.2f}. Bot stopped.")
     elif not market_open and not st.session_state.allow_ext_hours:
         bot_reason = "MARKET CLOSED"
