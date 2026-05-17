@@ -22,8 +22,8 @@ from zoneinfo import ZoneInfo
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  st.secrets["API_KEY"]
-    SECRET_KEY = st.secrets["SECRET_KEY"]
+    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
+    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -73,6 +73,107 @@ def init_session_state():
         else: st.session_state.logs = []
 
 init_session_state()
+
+def calculate_win_loss_metrics(history_df):
+    """Calculates win/loss statistics and gross USD PnL metrics by matching buy/sell transactions with built-in memory caching."""
+    if history_df.empty:
+        return {
+            "win_rate": "0.0%", "win_loss_ratio": "0.00", "total_trades": 0, "wins": 0, "losses": 0,
+            "gross_profit_usd": 0.0, "gross_loss_usd": 0.0, "net_profit_usd": 0.0, "profit_factor": "0.00"
+        }
+
+    # ====================================================================================
+    # HYBRID MEMORY CACHE LAYER: DETECTS DATASET MODIFICATIONS USING STRUCTURAL HASHING
+    # ====================================================================================
+    try:
+        # Create a completely unique string signature based on row count and data characteristics
+        data_signature = f"metrics_hash_{len(history_df)}_{history_df.iloc[0]['Execution Time'] if not history_df.empty else 'empty'}_{history_df.iloc[-1]['Execution Time'] if not history_df.empty else 'empty'}"
+
+        # Serve results instantly from fast local memory if this exact dataset signature was analyzed already
+        if "cached_win_loss_metrics" in st.session_state and st.session_state.get("metrics_cache_sig") == data_signature:
+            return st.session_state["cached_win_loss_metrics"]
+    except Exception:
+        data_signature = None
+    # ====================================================================================
+
+    # Sort history from oldest to newest to track progression accurately
+    df = history_df.copy()
+    df['Execution Time'] = pd.to_datetime(df['Execution Time'])
+    df = df.sort_values(by='Execution Time', ascending=True)
+
+    # Storage trackers for matching pairs
+    open_trades = {} # Maps symbol -> (entry_price, entry_qty, side)
+    wins = 0
+    losses = 0
+    gross_profit_usd = 0.0
+    gross_loss_usd = 0.0
+
+    for _, row in df.iterrows():
+        symbol = row['Symbol']
+        side = row['Side'] # BUY or SELL
+        price = row['Avg Price']
+        qty = row['Filled Qty']
+
+        # If we don't have an active tracking position for this ticker, open one
+        if symbol not in open_trades:
+            open_trades[symbol] = (price, qty, side)
+        else:
+            entry_price, entry_qty, entry_side = open_trades[symbol]
+
+            # Verify that this transaction closes out our original entry direction
+            if side != entry_side:
+                # Use the smaller quantity of the two matches to prevent scaling bugs
+                trade_qty = min(qty, entry_qty)
+
+                if entry_side == "BUY":
+                    # LONG Trade: Profit = (Exit Price - Entry Price) * Quantity
+                    trade_pnl = (price - entry_price) * trade_qty
+                    is_win = price > entry_price
+                else:
+                    # SHORT Trade: Profit = (Entry Price - Exit Price) * Quantity
+                    trade_pnl = (entry_price - price) * trade_qty
+                    is_win = price < entry_price
+
+                if is_win:
+                    wins += 1
+                    gross_profit_usd += abs(trade_pnl)
+                else:
+                    losses += 1
+                    gross_loss_usd += abs(trade_pnl)
+
+                # Close the tracking loop for this matched trade pair
+                del open_trades[symbol]
+
+    total_trades = wins + losses
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+    win_loss_ratio = (wins / losses) if losses > 0 else float(wins)
+
+    # Advanced Financial Calculations
+    net_profit_usd = gross_profit_usd - gross_loss_usd
+    profit_factor = (gross_profit_usd / gross_loss_usd) if gross_loss_usd > 0 else float(gross_profit_usd)
+
+    final_metrics_output = {
+        "win_rate": f"{win_rate:.1f}%",
+        "win_loss_ratio": f"{win_loss_ratio:.2f}",
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "gross_profit_usd": gross_profit_usd,
+        "gross_loss_usd": gross_loss_usd,
+        "net_profit_usd": net_profit_usd,
+        "profit_factor": f"{profit_factor:.2f}" if gross_loss_usd > 0 else "Max (No Losses)"
+    }
+
+    # ====================================================================================
+    # COMMIT RESULTS TO CACHE LAYER BEFORE EXITING THE CORE ROUTINE
+    # ====================================================================================
+    if data_signature:
+        st.session_state["cached_win_loss_metrics"] = final_metrics_output
+        st.session_state["metrics_cache_sig"] = data_signature
+    # ====================================================================================
+
+    return final_metrics_output
+
 
 if "is_admin_unlocked" not in st.session_state:
         st.session_state["is_admin_unlocked"] = False
@@ -645,7 +746,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-
 @st.fragment(run_every=30)
 def live_ui():
 
@@ -661,6 +761,125 @@ def live_ui():
     status = get_market_status()
     market_open = status["open"]
     daily_pnl = get_daily_pnl()
+#========================================================================================
+    import datetime as ui_dt
+
+    # 1. INITIALIZE DEFAULT FALLBACK DATE VALUES IN SESSION STATE
+    current_now = ui_dt.datetime.now(ZoneInfo("America/Chicago"))
+    thirty_days_ago = current_now - ui_dt.timedelta(days=30)
+
+    # Store dates in session state to handle the data fetch step before drawing widgets
+    if "perf_start_val" not in st.session_state:
+        st.session_state["perf_start_val"] = thirty_days_ago.date()
+    if "perf_end_val" not in st.session_state:
+        st.session_state["perf_end_val"] = current_now.date()
+
+    current_start = st.session_state["perf_start_val"]
+    current_end = st.session_state["perf_end_val"]
+
+    # 2. HYBRID FETCH: Run analysis using the active dates to build our dynamic title
+    history_df = get_trade_history_df(trading_client, limit=100, start_date=current_start, end_date=current_end)
+
+    if not history_df.empty:
+        stats = calculate_win_loss_metrics(history_df)
+        current_rate_str = stats["win_rate"]
+    else:
+        stats = {"win_rate": "0.0%", "wins": 0, "losses": 0, "win_loss_ratio": "0.00", "total_trades": 0}
+        current_rate_str = "No Data"
+
+    # ====================================================================================
+    # DYNAMIC TEXT HEADER EXPANDER GRID (HOUSES BOTH INPUTS AND METRICS CARDS)
+    # ====================================================================================
+    expander_title = f"🏆 View Detailed AI Performance Metrics (Current Win Rate: {current_rate_str})"
+
+    with st.expander(expander_title, expanded=False):
+
+        # MOVE INPUTS HERE: Draw calendar pickers inside the top of the expander box
+        st.markdown("#### 📅 Performance Date Range Filter")
+        date_col1, date_col2 = st.columns(2)
+
+        with date_col1:
+            perf_start = st.date_input("Start Date", value=current_start, key="perf_start_input")
+        with date_col2:
+            perf_end = st.date_input("End Date", value=current_end, key="perf_end_input")
+
+        # If dates change, immediately update backing values and trigger a rerun to calculate fresh stats
+        if perf_start != current_start or perf_end != current_end:
+            if perf_start > perf_end:
+                st.error("Error: Start Date cannot be further in the future than End Date.")
+            else:
+                st.session_state["perf_start_val"] = perf_start
+                st.session_state["perf_end_val"] = perf_end
+                st.rerun()
+
+        st.markdown("---")
+
+        # Display performance scorecard summary rows inside the expander
+        st.markdown("### 🏆 AI Performance Metrics")
+        s_col1, s_col2, s_col3, s_col4 = st.columns(4)
+
+        s_col1.metric(
+            label="🎯 Model Win Rate", 
+            value=stats["win_rate"],
+            delta=f"{stats['wins']}W - {stats['losses']}L"
+        )
+
+        ratio_val = float(stats["win_loss_ratio"])
+        s_col2.metric(
+            label="📊 Win/Loss Ratio", 
+            value=stats["win_loss_ratio"],
+            delta="Profitable Regime" if ratio_val >= 1.0 else "Sub-Optimal Regime",
+            delta_color="normal" if ratio_val >= 1.0 else "inverse"
+        )
+
+        s_col3.metric(
+            label="🔄 Total Closed Round-Trips", 
+            value=str(stats["total_trades"])
+        )
+
+        # Swapped static placeholder out for dynamic Profit Factor metric integration
+        s_col4.metric(
+            label="📈 Profit Factor", 
+            value=stats.get("profit_factor", "0.00")
+        )
+
+        st.markdown("---")
+
+        # NEW INTEGRATION BLOCK: Financial performance metrics matrix breakdown (USD)
+        st.markdown("### 💵 Financial Performance (USD)")
+        p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+
+        # Formatted values extraction logic for clean conditional layout styling 
+        net_val = stats.get("net_profit_usd", 0.0)
+        net_color = "normal" if net_val >= 0 else "inverse"
+
+        p_col1.metric(
+            label="💰 Net Profit/Loss", 
+            value=f"${net_val:,.2f}", 
+            delta="Profitable" if net_val >= 0 else "Negative", 
+            delta_color=net_color
+        )
+        p_col2.metric(
+            label="🟢 Gross Profit", 
+            value=f"${stats.get('gross_profit_usd', 0.0):,.2f}"
+        )
+        p_col3.metric(
+            label="🔴 Gross Loss", 
+            value=f"${stats.get('gross_loss_usd', 0.0):,.2f}"
+        )
+
+        # Use the fourth column slot for your clear original range window tracking notice
+        with p_col4:
+            st.caption("%📆 **Active Filter Window**")
+            st.write(f"From: `{perf_start}`")
+            st.write(f"To: `{perf_end}`")
+
+        st.markdown("---")
+
+        # Show inline info alert if the selected inner window returns blank data rows
+        if history_df.empty:
+            st.info(f"No trade records found between {perf_start} and {perf_end} to analyze performance.")
+    # ====================================================================================
 
 
     # ====================================================================================
