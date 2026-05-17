@@ -41,7 +41,7 @@ if "model_vault" not in st.session_state:
 
 
 def save_settings():
-    keys = ["tickers", "run_bot", "order_mode", "order_val", "trailing_pct", 
+    keys = ["tickers", "run_bot", "order_mode","sizing_mode", "order_val", "trailing_pct", 
             "profit_target", "ai_threshold", "vix_threshold", "lock_profit_pct", 
             "daily_loss_limit", "global_profit_goal", "allow_ext_hours","profit_target","bot_active"]
     settings_data = {k: st.session_state[k] for k in keys if k in st.session_state}
@@ -57,7 +57,7 @@ def add_log(msg):
         f.write(formatted_msg + "\n")
 
 def init_session_state():
-    defaults = {"tickers": ["SPY", "QQQ", "NVDA","GOOGL", "IWM","FDVV"], "run_bot": False, "order_mode": "USD", 
+    defaults = {"tickers": ["SPY", "QQQ", "NVDA","GOOGL", "IWM","FDVV"], "run_bot": False, "order_mode": "USD","sizing_mode": "USD", 
                 "order_val": 500.0, "trailing_pct": .2, "profit_target": 0.5, 
                 "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.5,
                 "daily_loss_limit": 100.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
@@ -233,27 +233,60 @@ with st.sidebar:
 
 
     st.header("🛒 Order Configuration")
+
+    # Ensure required tracking states exist to prevent index out of bounds flags
+    if "sizing_mode" not in st.session_state:
+        st.session_state["sizing_mode"] = "USD"
+    if "order_mode" not in st.session_state:
+        st.session_state["order_mode"] = "USD"
+
+    # ====================================================================================
+    # 1. STATE CONTROLLER: SYNCHRONIZE INPUT VARIATION MATRIX AUTOMATICALLY
+    # ====================================================================================
+    # Advanced models (Kelly / Volatility) process capital allocations natively in USD.
+    # We force-sync the order mode to USD behind the scenes if an advanced matrix is chosen.
+    if st.session_state["sizing_mode"] in ["Kelly", "Volatility"]:
+        st.session_state["order_mode"] = "USD"
+        inputs_disabled = True  # Locks manual adjustments because the engine takes control
+    else:
+        inputs_disabled = admin_disabled  # Defaults back to standard admin toggles
+
     # Toggle between USD (Dollar) and Shares (Stock)
-    # This updates st.session_state["order_mode"] automatically
-    st.selectbox("Order Mode", options=["USD", "Shares"], key="order_mode", on_change=save_settings, disabled=admin_disabled)
+    st.selectbox(
+        "Order Mode", 
+        options=["USD", "Shares"], 
+        key="order_mode", 
+        on_change=save_settings, 
+        disabled=inputs_disabled # Dynamic lock maintains framework sync
+    )
 
     # Dynamic Label and Value based on selection
     if st.session_state.order_mode == "USD":
-        st.number_input("Order Amount ($)", min_value=1.0, step=10.0, key="order_val", on_change=save_settings, disabled=admin_disabled)
+        st.number_input(
+            "Order Amount ($)", 
+            min_value=1.0, 
+            step=10.0, 
+            key="order_val", 
+            on_change=save_settings, 
+            disabled=inputs_disabled
+        )
     else:
-        st.number_input("Number of Shares", min_value=1.0, step=1.0, key="order_val", on_change=save_settings, disabled=admin_disabled)
+        st.number_input(
+            "Number of Shares", 
+            min_value=1.0, 
+            step=1.0, 
+            key="order_val", 
+            on_change=save_settings, 
+            disabled=inputs_disabled
+        )
     st.divider()
 
     # ====================================================================================
-    # INTEGRATED CAPITAL SIZING ENGINE UI MATRIX (MERGED SEAMLESSLY AS REQUESTED)
+    # 2. INTEGRATED CAPITAL SIZING ENGINE UI MATRIX (SYNCHRONIZED PATHWAY)
     # ====================================================================================
-    # Ensure required calculation states exist to prevent layout warning flags
-    if "sizing_mode" not in st.session_state:
-        st.session_state["sizing_mode"] = "USD"
-
     st.markdown("### 🧮 Capital Sizing Engine")
 
-    # 1. Primary Sizing Mechanism Selector
+    # Primary Sizing Mechanism Selector
     selected_mode = st.radio(
         "Position Sizing Mode",
         options=["USD", "Shares", "Kelly", "Volatility"],
@@ -264,54 +297,48 @@ with st.sidebar:
         help="USD/Shares: Static entry values. Kelly: Risk-adjusted win percentage weight. Volatility: Automatically down-sizes cash exposure when VIXY triggers a market spike."
     )
 
-    # 2. DYNAMIC CONTEXTUAL METRICS DISPLAY LAYER
+    # 3. DYNAMIC CONTEXTUAL METRICS DISPLAY LAYER
     if selected_mode == "Kelly":
         cached_stats = st.session_state.get("cached_win_loss_metrics", None)
 
         if cached_stats and cached_stats.get("total_trades", 0) >= 5:
             try:
-                # Re-read stats parameters to render predictive previews to the user
                 win_rate = float(cached_stats["win_rate"].replace("%", "")) / 100.0
                 win_loss_ratio = float(cached_stats["win_loss_ratio"])
 
                 # Re-verify the formula matrix: K% = W - [(1 - W) / R]
                 kelly_pct = win_rate - ((1.0 - win_rate) / win_loss_ratio)
-                fractional_kelly = kelly_pct * 0.20 # 20% Fractional padding rule
+                fractional_kelly = kelly_pct * 0.20 
                 safe_kelly_pct = max(0.0, min(fractional_kelly, 0.10))
 
-                st.success(f"🍏 Kelly Matrix Active\nAllocating **{safe_kelly_pct:.1%}** of account cash per transaction.")
+                st.success(f"Advance Allocation Rule Active:\n🤖 System is overriding inputs to risk exactly **{safe_kelly_pct:.1%}** of portfolio equity.")
             except Exception:
                 st.caption("🔄 Computing model parameters...")
         else:
-            # Informational warning notice if baseline data constraints are unfulfilled
-            st.warning("⏳ Kelly Pipeline Paused: Requires at least **5 closed trades** in your Performance History to compute a baseline.")
+            st.warning("⏳ Kelly Pipeline Paused: Requires at least **5 closed trades** in your Performance History to compute a baseline. Currently using manual input entries.")
 
     elif selected_mode == "Volatility":
         current_vixy_shift = 0.0
         if "global_market_risk_matrix" in st.session_state:
             for row in st.session_state["global_market_risk_matrix"].get("matrix_rows", []):
                 if "VIXY" in row.get("Technical Factor", ""):
-                    try:
-                        current_vixy_shift = float(row["Daily Chg %"].replace("%", ""))
-                    except Exception:
-                        pass
+                    try: current_vixy_shift = float(row["Daily Chg %"].replace("%", ""))
+                    except Exception: pass
 
         max_vix_limit = float(st.session_state.get("cfg_vix_max", 10.0))
 
-        # Calculate live reduction metrics to reveal inside the panel
         if current_vixy_shift > 0:
             vol_multiplier = max(0.20, 1.0 - (current_vixy_shift / max_vix_limit))
         else:
             vol_multiplier = 1.0
 
         if vol_multiplier < 1.0:
-            st.warning(f"⚠️ Volatility Scaling Active\nReducing standard position entry sizes to **{vol_multiplier:.0%}** due to VIXY shift (+{current_vixy_shift:.2f}%).")
+            st.warning(f"⚠️ Volatility Scaling Active:\n🤖 Scaling manual input value **${st.session_state.order_val:,.2f}** down to **{vol_multiplier:.0%}** (${(st.session_state.order_val * vol_multiplier):,.2f}) due to market stress.")
         else:
-            st.info(f"🍏 Volatility Safe\nMarket conditions stable. Sizing multiplier at **100%**.")
+            st.info(f"🍏 Volatility Safe\nMarket stable. Using full manual allocation boundary (**${st.session_state.order_val:,.2f}**).")
 
     else:
-        # Basic static mode baseline placeholder notifications
-        st.caption(f"Using fixed execution bounds configured by your order input settings.")
+        st.caption(f"Using fixed execution bounds configured by your manual order settings.")
 
     st.divider()
 
