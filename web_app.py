@@ -22,8 +22,8 @@ from zoneinfo import ZoneInfo
 
 # --- 1. CONFIG & CLIENTS ---
 try:
-    API_KEY =  "PKXBV4FL3KV6QUYIP25NH2Z3GU" #st.secrets["API_KEY"]
-    SECRET_KEY = "2HLaKZF1CtUHPRZEm8S3TEZ41ermcRRmrGbiv9FJ2B7r" #st.secrets["SECRET_KEY"]
+    API_KEY =  st.secrets["API_KEY"]
+    SECRET_KEY = st.secrets["SECRET_KEY"]
 except:
     st.error("Please set API_KEY and SECRET_KEY in Streamlit Secrets.")
     st.stop()
@@ -231,6 +231,7 @@ with st.sidebar:
     # Manual Override Checkbox to completely force-ignore circuit breaker shutdowns
     breaker_bypass = st.sidebar.checkbox("🔓 Bypass Crash Protection", value=False, help="Forces bot to trade regardless of crashes", disabled=admin_disabled)
 
+
     st.header("🛒 Order Configuration")
     # Toggle between USD (Dollar) and Shares (Stock)
     # This updates st.session_state["order_mode"] automatically
@@ -241,7 +242,80 @@ with st.sidebar:
         st.number_input("Order Amount ($)", min_value=1.0, step=10.0, key="order_val", on_change=save_settings, disabled=admin_disabled)
     else:
         st.number_input("Number of Shares", min_value=1.0, step=1.0, key="order_val", on_change=save_settings, disabled=admin_disabled)
-    st.divider()    
+    st.divider()
+
+    # ====================================================================================
+    # INTEGRATED CAPITAL SIZING ENGINE UI MATRIX (MERGED SEAMLESSLY AS REQUESTED)
+    # ====================================================================================
+    # Ensure required calculation states exist to prevent layout warning flags
+    if "sizing_mode" not in st.session_state:
+        st.session_state["sizing_mode"] = "USD"
+
+    st.markdown("### 🧮 Capital Sizing Engine")
+
+    # 1. Primary Sizing Mechanism Selector
+    selected_mode = st.radio(
+        "Position Sizing Mode",
+        options=["USD", "Shares", "Kelly", "Volatility"],
+        index=["USD", "Shares", "Kelly", "Volatility"].index(st.session_state["sizing_mode"]),
+        key="sizing_mode",
+        on_change=save_settings,
+        disabled=admin_disabled,
+        help="USD/Shares: Static entry values. Kelly: Risk-adjusted win percentage weight. Volatility: Automatically down-sizes cash exposure when VIXY triggers a market spike."
+    )
+
+    # 2. DYNAMIC CONTEXTUAL METRICS DISPLAY LAYER
+    if selected_mode == "Kelly":
+        cached_stats = st.session_state.get("cached_win_loss_metrics", None)
+
+        if cached_stats and cached_stats.get("total_trades", 0) >= 5:
+            try:
+                # Re-read stats parameters to render predictive previews to the user
+                win_rate = float(cached_stats["win_rate"].replace("%", "")) / 100.0
+                win_loss_ratio = float(cached_stats["win_loss_ratio"])
+
+                # Re-verify the formula matrix: K% = W - [(1 - W) / R]
+                kelly_pct = win_rate - ((1.0 - win_rate) / win_loss_ratio)
+                fractional_kelly = kelly_pct * 0.20 # 20% Fractional padding rule
+                safe_kelly_pct = max(0.0, min(fractional_kelly, 0.10))
+
+                st.success(f"🍏 Kelly Matrix Active\nAllocating **{safe_kelly_pct:.1%}** of account cash per transaction.")
+            except Exception:
+                st.caption("🔄 Computing model parameters...")
+        else:
+            # Informational warning notice if baseline data constraints are unfulfilled
+            st.warning("⏳ Kelly Pipeline Paused: Requires at least **5 closed trades** in your Performance History to compute a baseline.")
+
+    elif selected_mode == "Volatility":
+        current_vixy_shift = 0.0
+        if "global_market_risk_matrix" in st.session_state:
+            for row in st.session_state["global_market_risk_matrix"].get("matrix_rows", []):
+                if "VIXY" in row.get("Technical Factor", ""):
+                    try:
+                        current_vixy_shift = float(row["Daily Chg %"].replace("%", ""))
+                    except Exception:
+                        pass
+
+        max_vix_limit = float(st.session_state.get("cfg_vix_max", 10.0))
+
+        # Calculate live reduction metrics to reveal inside the panel
+        if current_vixy_shift > 0:
+            vol_multiplier = max(0.20, 1.0 - (current_vixy_shift / max_vix_limit))
+        else:
+            vol_multiplier = 1.0
+
+        if vol_multiplier < 1.0:
+            st.warning(f"⚠️ Volatility Scaling Active\nReducing standard position entry sizes to **{vol_multiplier:.0%}** due to VIXY shift (+{current_vixy_shift:.2f}%).")
+        else:
+            st.info(f"🍏 Volatility Safe\nMarket conditions stable. Sizing multiplier at **100%**.")
+
+    else:
+        # Basic static mode baseline placeholder notifications
+        st.caption(f"Using fixed execution bounds configured by your order input settings.")
+
+    st.divider()
+
+
     st.header("🤖 Bot Control")
     st.toggle("Activate AI Bot", key="run_bot", on_change=save_settings, disabled=admin_disabled)
     st.toggle("Allow Extended Hours", key="allow_ext_hours", on_change=save_settings, disabled=admin_disabled)
@@ -453,7 +527,59 @@ def get_ai_prediction(df, symbol):
         st.error(f"AI Error: {e}")
         return "NEUTRAL", 0.5, [0.5]*10, {}
 
-# Helper for execution (Supports USD/Shares toggle, Extended Hours, and Duplicate Protection)
+
+def calculate_kelly_qty(portfolio_value, price, stats, risk_fraction=0.20):
+    """
+    Uses the Kelly Criterion to find the optimal cash allocation percentage.
+    risk_fraction (Fractional Kelly) tones down the math to prevent aggressive over-betting.
+    """
+    try:
+        # Extract win rate and win/loss ratio from your cached stats dictionary
+        win_rate = float(stats["win_rate"].replace("%", "")) / 100.0
+        win_loss_ratio = float(stats["win_loss_ratio"])
+
+        if win_rate <= 0 or win_loss_ratio <= 0:
+            return None # Return fallback to your original static configurations
+
+        # Kelly Formula: K% = W - [(1 - W) / R]
+        # W = Win Probability, R = Win/Loss Ratio
+        kelly_percentage = win_rate - ((1.0 - win_rate) / win_loss_ratio)
+
+        # Apply the fractional risk padding scaling multiplier and boundary limits (0% to 10% max portfolio cash per trade)
+        safe_kelly_pct = max(0.0, min(kelly_percentage * risk_fraction, 0.10))
+
+        # Translate optimal cash percentage to an exact share allocation quantity
+        target_usd_allocation = portfolio_value * safe_kelly_pct
+        qty = int(target_usd_allocation // price)
+        return qty if qty >= 1 else 1
+    except Exception:
+        return None # Return fallback if division-by-zero or value errors map out
+
+def calculate_volatility_adjusted_qty(base_usd_val, price, current_vixy_pct):
+    """
+    Volatility-Based Sizing (ATR alternative using dynamic VIXY percentage metrics).
+    Scales down position size linearly if current VIXY shifts past your sidebar target ceiling.
+    """
+    try:
+        # Read the active sidebar crash parameter directly from memory
+        max_vix_limit = float(st.session_state.get("cfg_vix_max", 10.0))
+
+        # Determine current multiplier: if volatility is 0% or negative, size stays at 100%
+        if current_vixy_pct <= 0:
+            vol_multiplier = 1.0
+        else:
+            # Linear decay: as VIXY approaches or breaches limits, cash allocation drops smoothly down to a minimum of 20%
+            vol_multiplier = max(0.20, 1.0 - (current_vixy_pct / max_vix_limit))
+
+        adjusted_usd_val = base_usd_val * vol_multiplier
+        qty = int(adjusted_usd_val // price)
+        return qty if qty >= 1 else 1
+    except Exception:
+        return None
+
+
+
+# Helper for execution (Supports USD/Shares/Kelly/Volatility Sizing, Extended Hours, and Duplicate Protection)
 def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
     try:
         # --- 1. DUPLICATE PROTECTION: Check Positions and Pending Orders ---
@@ -466,8 +592,56 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
         if open_orders:
             return # Exit silently if order is pending
 
-        # --- 2. MODE LOGIC: Calculate QTY based on USD or Shares ---
-        if st.session_state.order_mode == "USD":
+        # --- 2. ADVANCED HYBRID SIZING ENGAGEMENT (INTEGRATED KELLY & VOLATILITY MATRIX) ---
+        base_usd_value = float(st.session_state.order_val)
+        computed_qty = None
+
+        # Pull account equity from optimized hybrid registers or fall back safely to live REST
+        portfolio_value = float(st.session_state.get("ws_equity", 0.0))
+        if portfolio_value <= 0:
+            try: portfolio_value = float(trading_client.get_account().equity)
+            except: portfolio_value = 10000.0 # Standard defensive seed fallback
+
+        sizing_mode = st.session_state.get("sizing_mode", "USD") # Managed by your sidebar radio widget
+
+        if sizing_mode == "Kelly":
+            # Extract live round-trip metric parameters from your dynamic cache signature dictionary
+            cached_stats = st.session_state.get("cached_win_loss_metrics", None)
+            if cached_stats and cached_stats.get("total_trades", 0) >= 5:
+                try:
+                    win_rate = float(cached_stats["win_rate"].replace("%", "")) / 100.0
+                    win_loss_ratio = float(cached_stats["win_loss_ratio"])
+
+                    if win_rate > 0 and win_loss_ratio > 0:
+                        # Kelly Formula: K% = W - [(1 - W) / R] with a fractional multiplier constraint of 0.20
+                        kelly_percentage = win_rate - ((1.0 - win_rate) / win_loss_ratio)
+                        safe_kelly_pct = max(0.0, min(kelly_percentage * 0.20, 0.10)) # Cap risk to max 10% cash
+
+                        target_usd_allocation = portfolio_value * safe_kelly_pct
+                        computed_qty = int(target_usd_allocation // price)
+                except Exception:
+                    pass
+
+        elif sizing_mode == "Volatility":
+            # Read real-time VIXY dynamic percent shifts computed by your top-level layout block
+            current_vixy_shift = 0.0
+            if "global_market_risk_matrix" in st.session_state:
+                for row in st.session_state["global_market_risk_matrix"].get("matrix_rows", []):
+                    if "VIXY" in row.get("Technical Factor", ""):
+                        try: current_vixy_shift = float(row["Daily Chg %"].replace("%", ""))
+                        except: pass
+            try:
+                max_vix_limit = float(st.session_state.get("cfg_vix_max", 10.0))
+                # Linear decay fallback: scales position size lower if VIXY triggers a spike (min size 20%)
+                vol_multiplier = max(0.20, 1.0 - (current_vixy_shift / max_vix_limit)) if current_vixy_shift > 0 else 1.0
+                computed_qty = int((base_usd_value * vol_multiplier) // price)
+            except Exception:
+                pass
+
+        # --- FALLBACK SELECTION STRUCTURE ---
+        if computed_qty is not None:
+            qty = computed_qty
+        elif st.session_state.order_mode == "USD":
             qty = int(st.session_state.order_val // price)
         else:
             qty = int(st.session_state.order_val)
@@ -571,8 +745,21 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
             # STEP 4: OCO REPLICATION LOOP (MUTUAL CANCELLATION ENGINE)
             # ====================================================================================
             while True:
-                tp_status = trading_client.get_order_by_id(tp_order.id).status
-                sl_status = trading_client.get_order_by_id(sl_order.id).status
+                # Read Take Profit tracking index status with dynamic hybrid streaming fallbacks
+                tp_update_key = f"ws_order_status_{tp_order.id}"
+                if tp_update_key in st.session_state and st.session_state[tp_update_key] is not None:
+                    tp_status = st.session_state[tp_update_key]
+                else:
+                    try: tp_status = trading_client.get_order_by_id(tp_order.id).status
+                    except: tp_status = OrderStatus.HELD
+
+                # Read Stop Loss tracking index status with dynamic hybrid streaming fallbacks
+                sl_update_key = f"ws_order_status_{sl_order.id}"
+                if sl_update_key in st.session_state and st.session_state[sl_update_key] is not None:
+                    sl_status = st.session_state[sl_update_key]
+                else:
+                    try: sl_status = trading_client.get_order_by_id(sl_order.id).status
+                    except: sl_status = OrderStatus.HELD
 
                 # If profit target hit, kill the stop loss
                 if tp_status == OrderStatus.FILLED:
@@ -599,12 +786,13 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
 
         # --- 5. LOGGING & NOTIFICATION ---
         action_type = "Long" if side == OrderSide.BUY else "Short"
-        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} {action_type} Advanced Limit Entry Set: {s} @ ${price} | TP Target: ${target_take_profit_price} | SL Target: ${target_stop_loss_price}"
+        msg = f"{'🤖 Bot' if is_bot else '👤 Manual'} {action_type} Advanced Limit Entry Set: {s} @ ${price} (Qty: {qty}) | TP Target: ${target_take_profit_price} | SL Target: ${target_stop_loss_price}"
         add_log(msg)
         st.toast(msg, icon="🚀")
 
     except Exception as e:
         st.error(f"Trade Failed: {e}")
+
 
 def get_pending_orders_df(trading_client):
     """Fetches open/pending orders and converts them into a formatted Pandas DataFrame."""
