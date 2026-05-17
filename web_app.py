@@ -57,10 +57,10 @@ def add_log(msg):
         f.write(formatted_msg + "\n")
 
 def init_session_state():
-    defaults = {"tickers": ["SPY", "QQQ", "NVDA", "IWM","FDVV"], "run_bot": False, "order_mode": "USD", 
-                "order_val": 1000.0, "trailing_pct": 2.0, "profit_target": 5.0, 
-                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 5.0,
-                "daily_loss_limit": 500.0, "global_profit_goal": 1000.0, "allow_ext_hours": False,"profit_target":2.0}
+    defaults = {"tickers": ["SPY", "QQQ", "NVDA","GOOGL", "IWM","FDVV"], "run_bot": False, "order_mode": "USD", 
+                "order_val": 500.0, "trailing_pct": .2, "profit_target": 0.5, 
+                "ai_threshold": 0.85, "vix_threshold": 25.0, "lock_profit_pct": 0.5,
+                "daily_loss_limit": 100.0, "global_profit_goal": 1000.0, "allow_ext_hours": False}
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r") as f: defaults.update(json.load(f))
@@ -161,18 +161,18 @@ with st.sidebar:
 
     st.divider()
     st.header("🛡️ Strategy")
-    st.slider("Trailing Start %", 1.0, 50.0, key="lock_profit_pct", on_change=save_settings, disabled=admin_disabled)
+    st.slider("Trailing Start %", 0.0, 50.0, key="lock_profit_pct", on_change=save_settings, disabled=admin_disabled)
     # Take Profit threshold slider (e.g., automatically close position at +5.0% profit)
     st.slider(
         "Take Profit Target %", 
-        min_value=1.0, 
+        min_value=0.0, 
         max_value=50.0, 
         step=0.5,
         key="profit_target",
         on_change=save_settings,
         help="Automatically liquidates an active position if its profit matches or exceeds this percentage.", disabled=admin_disabled
     )
-    st.slider("Stop Loss %", 1.0, 50.0, key="trailing_pct", on_change=save_settings, disabled=admin_disabled)
+    st.slider("Stop Loss %", 0.0, 50.0, key="trailing_pct", on_change=save_settings, disabled=admin_disabled)
 
     if st.button("🚨 EMERGENCY LIQUIDATE", type="primary", use_container_width=True, disabled=admin_disabled):
         trading_client.close_all_positions(cancel_orders=True)
@@ -419,17 +419,27 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
             print(f"Entry order {entry_order.id} submitted. Awaiting execution...")
 
             # ====================================================================================
-            # STEP 2: MONITOR ENTRY ORDER FILL STATE
+            # STEP 2: MONITOR ENTRY ORDER FILL STATE (HYBRID WEBSOCKET TIMEOUT STRUCTURE)
             # ====================================================================================
             is_filled = False
             while not is_filled:
-                check_order = trading_client.get_order_by_id(entry_order.id)
+                # Primary Path: Pull real-time order update states from WebSocket streams
+                ws_update_key = f"ws_order_status_{entry_order.id}"
+                if ws_update_key in st.session_state and st.session_state[ws_update_key] is not None:
+                    current_status = st.session_state[ws_update_key]
+                else:
+                    # Backup Path: Silently fetch from REST API if streaming updates have an expected network delay
+                    try:
+                        check_order = trading_client.get_order_by_id(entry_order.id)
+                        current_status = check_order.status
+                    except Exception:
+                        current_status = OrderStatus.HELD # Maintain placeholder while network reconnects
 
-                if check_order.status == OrderStatus.FILLED:
+                if current_status == OrderStatus.FILLED:
                     print("Entry order filled! Deploying synthetic brackets...")
                     is_filled = True
-                elif check_order.status in [OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
-                    raise RuntimeError(f"Entry order terminated without filling: {check_order.status}")
+                elif current_status in [OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
+                    raise RuntimeError(f"Entry order terminated without filling: {current_status}")
 
                 time.sleep(1) # Frequency buffer to prevent API rate limiting
 
@@ -497,13 +507,30 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
 
 def get_pending_orders_df(trading_client):
     """Fetches open/pending orders and converts them into a formatted Pandas DataFrame."""
+    import time as sys_time
+
+    # ====================================================================================
+    # HYBRID MEMORY CACHE LAYER: ELIMINATES REST API LAG ON MANUAL UI INTERACTIONS
+    # ====================================================================================
+    cache_key = "cached_pending_orders_df"
+    cache_time_key = "pending_orders_last_update"
+
+    # If the cache exists and was updated less than 60 seconds ago, return it instantly
+    if cache_key in st.session_state and sys_time.time() - st.session_state.get(cache_time_key, 0) < 60:
+        return st.session_state[cache_key]
+    # ====================================================================================
+
     try:
         # Request only 'open' (pending) orders from Alpaca
         filter_request = GetOrdersRequest(status=QueryOrderStatus.OPEN)
         open_orders = trading_client.get_orders(filter=filter_request)
 
         if not open_orders:
-            return pd.DataFrame() # Return empty dataframe if no orders pending
+            empty_df = pd.DataFrame()
+            # Cache the empty state to remain consistent
+            st.session_state[cache_key] = empty_df
+            st.session_state[cache_time_key] = sys_time.time()
+            return empty_df # Return empty dataframe if no orders pending
 
         # Parse relevant attributes into rows
         order_data = []
@@ -519,13 +546,33 @@ def get_pending_orders_df(trading_client):
                 "Created At": order.created_at.strftime("%Y-%m-%d %H:%M:%S")
             })
 
-        return pd.DataFrame(order_data)
+        final_df = pd.DataFrame(order_data)
+
+        # Save the structured dataframe to the local session state cache
+        st.session_state[cache_key] = final_df
+        st.session_state[cache_time_key] = sys_time.time()
+
+        return final_df
     except Exception as e:
         st.error(f"Error fetching orders: {e}")
         return pd.DataFrame()
 
 def get_trade_history_df(trading_client, limit=50, start_date=None, end_date=None):
     """Fetches closed/filled orders and converts them into a Pandas DataFrame."""
+    import time as sys_time
+
+    # ====================================================================================
+    # HYBRID MEMORY CACHE LAYER: PARAMETER-AWARE FILTER ELIMINATES UNNECESSARY HISTORY RE-FETCHING
+    # ====================================================================================
+    # Create a unique cache identity key based completely on the current search filter parameters
+    param_cache_identity = f"history_cache_{limit}_{start_date}_{end_date}"
+    time_cache_identity = f"history_last_update_{limit}_{start_date}_{end_date}"
+
+    # If this exact date/limit query was executed within the last 60 seconds, serve it from memory instantly
+    if param_cache_identity in st.session_state and sys_time.time() - st.session_state.get(time_cache_identity, 0) < 60:
+        return st.session_state[param_cache_identity]
+    # ====================================================================================
+
     try:
         # Convert date objects directly to ISO string formats accepted by Alpaca to avoid namespace bugs
         api_start = f"{start_date}T00:00:00Z" if start_date else None
@@ -541,7 +588,11 @@ def get_trade_history_df(trading_client, limit=50, start_date=None, end_date=Non
         closed_orders = trading_client.get_orders(filter=filter_request)
 
         if not closed_orders:
-            return pd.DataFrame() # Return empty if history is blank
+            empty_df = pd.DataFrame()
+            # Cache the empty state payload for consistency
+            st.session_state[param_cache_identity] = empty_df
+            st.session_state[time_cache_identity] = sys_time.time()
+            return empty_df # Return empty if history is blank
 
         history_data = []
         for order in closed_orders:
@@ -557,10 +608,17 @@ def get_trade_history_df(trading_client, limit=50, start_date=None, end_date=Non
                     "Execution Time": order.filled_at.strftime("%Y-%m-%d %H:%M:%S") if order.filled_at else "N/A"
                 })
 
-        return pd.DataFrame(history_data)
+        final_df = pd.DataFrame(history_data)
+
+        # Save the finalized DataFrame and current timestamp into the local parameters cache slot
+        st.session_state[param_cache_identity] = final_df
+        st.session_state[time_cache_identity] = sys_time.time()
+
+        return final_df
     except Exception as e:
         st.error(f"Error fetching trade history: {e}")
         return pd.DataFrame()
+
 
 if "cached_asset_names" not in st.session_state:
     st.session_state["cached_asset_names"] = {}
@@ -588,8 +646,9 @@ st.markdown(
 )
 
 
-@st.fragment(run_every=60)
+@st.fragment(run_every=30)
 def live_ui():
+
     # Fetch current time localized explicitly to the Central Time Zone
     now_dt = datetime.now(ZoneInfo("America/Chicago"))
     last_refresh = now_dt.strftime("%I:%M:%S %p CST")
@@ -602,6 +661,136 @@ def live_ui():
     status = get_market_status()
     market_open = status["open"]
     daily_pnl = get_daily_pnl()
+
+
+    # ====================================================================================
+    # STEP 1: MARKET CRASH TECHNICAL FACTOR FETCH (RUNS ONCE ON TOP OF STREAMLIT LAYOUT)
+    # ====================================================================================
+    try:
+        import datetime as crash_dt
+        import time as sys_time
+
+        # 1. Fetch current Volatility Technical Factor (VIXY) with explicit start boundaries
+        # A lookback window of 5 days guarantees we fetch yesterday and today's daily bars across weekends
+        vix_start_time = crash_dt.datetime.now() - crash_dt.timedelta(days=5)
+
+        vix_req = StockBarsRequest(
+            symbol_or_symbols="VIXY",
+            timeframe=TimeFrame.Day,
+            start=vix_start_time,
+            feed=DataFeed.IEX
+        )
+
+        try:
+            # Fetch raw structural bars and normalize the index payload
+            vix_data = data_client.get_stock_bars(vix_req).df.reset_index()
+        except Exception as api_err:
+            # Fallback initialization mapping if network requests experience data delivery drops
+            vix_data = pd.DataFrame()
+
+        # --- START DYNAMIC DAILY PERCENTAGE CHANGE CALCULATIONS ---
+        if not vix_data.empty and len(vix_data) >= 2:
+            prev_vixy_close = float(vix_data['close'].iloc[-2])
+            current_vix = float(vix_data['close'].iloc[-1])
+
+            # Calculate daily shift percentage to assign to the status fields
+            vixy_daily_change_pct = ((current_vix - prev_vixy_close) / prev_vixy_close) * 100
+            vix_chg_str = f"{vixy_daily_change_pct:+.2f}%"
+
+            # Set active target metric variable to point to the percentage shift instead of raw price
+            vix_target_metric = vixy_daily_change_pct
+        else:
+            current_vix = float(vix_data['close'].iloc[-1]) if not vix_data.empty else 12.50
+            vixy_daily_change_pct = 0.0
+            vix_chg_str = "0.00%"
+            vix_target_metric = 0.0 # Fallback to standard 0.0% change metric if bars look missing
+        # --- END DYNAMIC DAILY PERCENTAGE CHANGE CALCULATIONS ---
+
+
+        # 2. Fetch Multi-Index Benchmark Profiles (SPY, QQQ, IWM)
+        benchmarks = ["SPY", "QQQ", "IWM"]
+        bench_req = StockBarsRequest(
+            symbol_or_symbols=benchmarks,
+            timeframe=TimeFrame.Day,
+            start=crash_dt.datetime.now() - crash_dt.timedelta(days=4),
+            feed=DataFeed.IEX
+        )
+        bench_data = data_client.get_stock_bars(bench_req).df.reset_index()
+
+        crash_reasons = []
+        matrix_rows = []
+
+        # Add VIX status data to row log collections using the updated percentage evaluation logic
+        vix_status = "⚠️ CRASH" if vix_target_metric > cfg_vix_max else "🍏 SAFE"
+        matrix_rows.append({
+            "Technical Factor": "Volatility (VIXY)", 
+            "Live Value": f"${current_vix:.2f}", 
+            "Daily Chg %": vix_chg_str, 
+            "Status": vix_status
+        })
+
+        # Verify high volatility regime against interactive slider value using the percentage logic
+        if vix_target_metric > cfg_vix_max:
+            crash_reasons.append(f"VIXY Spike ({vix_chg_str} > {cfg_vix_max:.1f}%)")
+
+        # Global compilation dictionary so individual tickers in the loop below can read the status instantly
+        st.session_state["global_market_risk_matrix"] = {
+            "is_market_crashing": len(crash_reasons) > 0,
+            "crash_reasons": crash_reasons,
+            "matrix_rows": matrix_rows
+        }
+    except Exception as top_level_err:
+        st.caption(f"⚠️ Critical Market-wide Matrix Extraction Failed: {top_level_err}")
+        # Populate safe fallbacks to ensure rendering layout grid below doesn't experience crash errors
+        vix_status = "🍏 SAFE"
+        vix_chg_str = "0.00%"
+        bench_data = pd.DataFrame()
+
+
+    # ====================================================================================
+    # STEP 2: HIGH-DENSITY PROGRESSIVE METRIC GRID (SHOWS EXACTLY ONCE AT THE TOP)
+    # ====================================================================================
+    with st.expander("📊 Market Risk Factor Metrics", expanded=False):
+
+        # Create 4 columns for VIXY, SPY, QQQ, and IWM
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+
+        # 1. Volatility Metric Card (VIXY Daily Percent Change vs Max Limit)
+        with m_col1:
+            # FIXED: vix_status is now guaranteed to exist
+            vix_status_icon = "🟢" if "SAFE" in vix_status else "🔴"
+            st.metric(
+                label=f"{vix_status_icon} Volatility (VIXY)", 
+                value=vix_chg_str, # Displays the live daily return string (e.g. +4.25%)
+                delta=f"Max Limit: +{cfg_vix_max:.1f}%",
+                delta_color="normal" if "SAFE" in vix_status else "inverse"
+            )
+
+        # 2. Extract and parse index daily performances dynamically from your data
+        for ticker, col_target in zip(["SPY", "QQQ", "IWM"], [m_col2, m_col3, m_col4]):
+            if not bench_data.empty and ticker in bench_data['symbol'].values:
+                ticker_df = bench_data[bench_data['symbol'] == ticker]
+                if len(ticker_df) >= 2:
+                    p_close = float(ticker_df['close'].iloc[-2])
+                    c_price = float(ticker_df['close'].iloc[-1])
+                    ret_pct = ((c_price - p_close) / p_close) * 100
+
+                    idx_icon = "🍏" if ret_pct > cfg_index_drop else "🚨"
+                    with col_target:
+                        st.metric(
+                            label=f"{idx_icon} {ticker} Benchmark",
+                            value=f"${c_price:,.2f}",
+                            delta=f"{ret_pct:+.2f}% (Limit: {cfg_index_drop:+.1f}%)",
+                            delta_color="normal" if ret_pct > cfg_index_drop else "inverse"
+                        )
+                else:
+                    with col_target:
+                        st.metric(label=f"🔄 {ticker}", value="Loading...")
+            else:
+                with col_target:
+                    st.metric(label=f"🔄 {ticker}", value="Loading...")
+
+    # ====================================================================================    
 
     # Circuit Breakers
     p_hit = daily_pnl >= st.session_state.global_profit_goal
@@ -634,17 +823,26 @@ def live_ui():
 
         # --- FETCH ACCOUNT VALUE AND BUYING POWER METRICS ---
     try:
-        # Pull real-time account data from Alpaca
-        acct_profile = trading_client.get_account()
+        if "ws_cash" in st.session_state and "ws_equity" in st.session_state:
+            avail_balance = float(st.session_state["ws_cash"])
+            portfolio_value = float(st.session_state["ws_equity"])
+        else:
+            # Pull real-time account data from Alpaca REST API as a secure fallback gate
+            acct_profile = trading_client.get_account()
 
-        # 'cash' or 'buying_power' represents what is available to deploy immediately
-        avail_balance = float(acct_profile.cash)
+            # 'cash' or 'buying_power' represents what is available to deploy immediately
+            avail_balance = float(acct_profile.cash)
 
-        # 'equity' represents the sum of your cash plus current market values of positions
-        portfolio_value = float(acct_profile.equity)
+            # 'equity' represents the sum of your cash plus current market values of positions
+            portfolio_value = float(acct_profile.equity)
+
+            # Seed the local state cache for future rapid layout draws
+            st.session_state["ws_cash"] = avail_balance
+            st.session_state["ws_equity"] = portfolio_value
     except Exception:
-        avail_balance = 0.0
-        portfolio_value = 0.0
+        # Fallback values preserve stability if both connections face a temporary failure
+        avail_balance = st.session_state.get("ws_cash", 0.0)
+        portfolio_value = st.session_state.get("ws_equity", 0.0)
 
     # Expand column template boundaries to a 5-column layout matrix
     m1, m_bal, m_port, m2, m3 = st.columns([1, 1, 1, 1, 1.2])
@@ -693,7 +891,19 @@ def live_ui():
             # --- START VIRTUAL MONITORING LOGIC ---
             # If market is CLOSED, we manually monitor the trailing stop-loss
             if not clock.is_open:
-                current_price = float(p.current_price)
+                # ====================================================================================
+                # HYBRID SYSTEM: WEBSOCKET REAL-TIME PRICE ROUTING WITH POSITION SNAPSHOT FALLBACK
+                # ====================================================================================
+                websocket_key = f"ws_latest_bar_{p.symbol}"
+
+                # Primary Path: Pull the absolute freshest real-time price from the WebSocket memory pool
+                if websocket_key in st.session_state and st.session_state[websocket_key] is not None:
+                    current_price = float(st.session_state[websocket_key].get('close', p.current_price))
+                # Secondary Backup Path: Fall back securely to the REST API position object property
+                else:
+                    current_price = float(p.current_price)
+                # ====================================================================================
+
                 avg_entry = float(p.avg_entry_price)
                 # Detect side - handle different API response formats (attribute vs dict)
                 p_side = getattr(p, 'side', 'long').lower()
@@ -766,9 +976,14 @@ def live_ui():
             qty, mkt_val, pnl_pct = float(p.qty), float(p.market_value), float(p.unrealized_plpc) * 100
 
             # --- START CURRENT PRICE FETCH ---
-            # Safely extract live ticking price parameter straight from position object attributes
-            live_ticker_price = float(p.current_price) if hasattr(p, 'current_price') else 0.0
+            # Hybrid Approach applied to UI: reads stream if available, falls back to raw position attribute
+            websocket_ui_key = f"ws_latest_bar_{p.symbol}"
+            if websocket_ui_key in st.session_state and st.session_state[websocket_ui_key] is not None:
+                live_ticker_price = float(st.session_state[websocket_ui_key].get('close', p.current_price))
+            else:
+                live_ticker_price = float(p.current_price) if hasattr(p, 'current_price') else 0.0
             # --- END CURRENT PRICE FETCH ---
+
 
             # ====================================================================================
             # OPTIMIZED LOCAL MEMORY ASSET LOOKUP
@@ -858,13 +1073,72 @@ def live_ui():
     st.subheader("⚡ AI Signals")
     for s in st.session_state.tickers:
         try:
-            # Fetch data (ensure IEX feed for free tier or SIP for paid)
-            df = data_client.get_stock_bars(StockBarsRequest(
-                symbol_or_symbols=s, 
-                timeframe=TimeFrame.Minute, 
-                start=datetime.now()-timedelta(days=30), 
-                feed=DataFeed.IEX
-            )).df.reset_index()
+            # ====================================================================================
+            # HYBRID DATA PIPELINE: WEBSOCKET DRIVEN WITH AUTOMATIC REST API FALLBACK
+            # ====================================================================================
+            state_key = f"historical_df_{s}"
+            websocket_key = f"ws_latest_bar_{s}" # Expected key where your background WebSocket thread saves incoming live bars
+
+            # 1. INITIALIZATION BASELINE: Fetch 30 days of history exactly once via REST API
+            if state_key not in st.session_state:
+                start_time = datetime.now() - timedelta(days=30)
+                try:
+                    init_df = data_client.get_stock_bars(StockBarsRequest(
+                        symbol_or_symbols=s, 
+                        timeframe=TimeFrame.Minute, 
+                        start=start_time, 
+                        feed=DataFeed.IEX
+                    )).df.reset_index()
+
+                    if not init_df.empty:
+                        st.session_state[state_key] = init_df
+                    else:
+                        add_log(f"⚠️ Initial REST fetch returned no data for {s}. Market might be closed.")
+                        continue
+                except Exception as init_err:
+                    add_log(f"❌ Failed to load initial baseline for {s}: {init_err}")
+                    continue
+
+            # 2. HYBRID LIVE UPDATE: Check WebSocket stream first, fallback to REST API if necessary
+            else:
+                # Primary Path: Pull the latest real-time bar directly from the background WebSocket stream
+                if websocket_key in st.session_state and st.session_state[websocket_key] is not None:
+                    ws_bar_dict = st.session_state[websocket_key]
+                    latest_bars_df = pd.DataFrame([ws_bar_dict])
+
+                    # Clear the WebSocket memory buffer slot so we don't process the exact same bar twice
+                    st.session_state[websocket_key] = None 
+
+                # Secondary Backup Path: If WebSocket has no bar, poll a small REST snapshot as a fail-safe
+                else:
+                    recent_start = datetime.now() - timedelta(minutes=5)
+                    try:
+                        latest_bars_df = data_client.get_stock_bars(StockBarsRequest(
+                            symbol_or_symbols=s, 
+                            timeframe=TimeFrame.Minute, 
+                            start=recent_start, 
+                            feed=DataFeed.IEX
+                        )).df.reset_index()
+                    except Exception as api_err:
+                        latest_bars_df = pd.DataFrame() # Create empty dataframe to safely bypass concat step
+                        st.caption(f"⚠️ Both streaming and REST backup failed for {s}: {api_err}")
+
+                # Merge any found live update (WebSocket or REST backup) into our master training matrix
+                if not latest_bars_df.empty:
+                    combined_df = pd.concat([st.session_state[state_key], latest_bars_df])
+                    combined_df = combined_df.drop_duplicates(subset=['timestamp']).reset_index(drop=True)
+
+                    # Prevent memory bloating over long periods by keeping exactly the latest 30 days of data (approx 12,000 bars)
+                    st.session_state[state_key] = combined_df.iloc[-12000:]
+
+            # FINAL VALIDATION CHECK: Block empty arrays from entering RandomForestClassifier
+            if state_key not in st.session_state or st.session_state[state_key].empty:
+                st.caption(f"🔄 Syncing live structural matrix streams for {s}...")
+                continue 
+
+            df = st.session_state[state_key]
+            # ====================================================================================
+
 
             #ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
             ai_dir, ai_conf, conf_hist, feat_map = get_ai_prediction(df, s)
@@ -948,88 +1222,12 @@ def live_ui():
                 # ====================================================================================
                 is_market_crashing = False
                 try:
-                    import datetime as crash_dt
-                    import time as sys_time
+                    st.session_state["risk_matrix_last_update"] = sys_time.time()
 
-                    # 1. Fetch current Volatility Technical Factor (VIXY) - Lookback increased to 2 for percentage calculation
-                    vix_req = StockBarsRequest(
-                        symbol_or_symbols="VIXY",
-                        timeframe=TimeFrame.Day,
-                        limit=2, # Modified from 1 to 2 to safely pull yesterday and today's candles
-                        feed=DataFeed.IEX
-                    )
-                    vix_data = data_client.get_stock_bars(vix_req).df.reset_index()
-
-                    # --- START DYNAMIC DAILY PERCENTAGE CHANGE CALCULATIONS ---
-                    if len(vix_data) >= 2:
-                        prev_vixy_close = float(vix_data['close'].iloc[-2])
-                        current_vix = float(vix_data['close'].iloc[-1])
-
-                        # Calculate daily shift percentage to assign to the status fields
-                        vixy_daily_change_pct = ((current_vix - prev_vixy_close) / prev_vixy_close) * 100
-                        vix_chg_str = f"{vixy_daily_change_pct:+.2f}%"
-
-                        # Set active target metric variable to point to the percentage shift instead of raw price
-                        vix_target_metric = vixy_daily_change_pct
-                    else:
-                        current_vix = float(vix_data['close'].iloc[-1]) if not vix_data.empty else 12.50
-                        vixy_daily_change_pct = 0.0
-                        vix_chg_str = "0.00%"
-                        vix_target_metric = 0.0 # Fallback to standard 0.0% change metric if bars look missing
-                    # --- END DYNAMIC DAILY PERCENTAGE CHANGE CALCULATIONS ---
-
-                    # 2. Fetch Multi-Index Benchmark Profiles (SPY, QQQ, IWM)
-                    benchmarks = ["SPY", "QQQ", "IWM"]
-                    bench_req = StockBarsRequest(
-                        symbol_or_symbols=benchmarks,
-                        timeframe=TimeFrame.Day,
-                        start=crash_dt.datetime.now() - crash_dt.timedelta(days=4),
-                        feed=DataFeed.IEX
-                    )
-                    bench_data = data_client.get_stock_bars(bench_req).df.reset_index()
-
-                    crash_reasons = []
-                    matrix_rows = []
-
-                    # Add VIX status data to row log collections using the updated percentage evaluation logic
-                    vix_status = "⚠️ CRASH" if vix_target_metric > cfg_vix_max else "🍏 SAFE"
-                    matrix_rows.append({
-                        "Technical Factor": "Volatility (VIXY)", 
-                        "Live Value": f"${current_vix:.2f}", 
-                        "Daily Chg %": vix_chg_str, 
-                        "Status": vix_status
-                    })
-
-                    # Verify high volatility regime against interactive slider value using the percentage logic
-                    if vix_target_metric > cfg_vix_max:
-                        crash_reasons.append(f"VIXY Spike ({vix_chg_str} > {cfg_vix_max:.1f}%)")
-
-                    # Calculate daily return for each baseline benchmark asset
-                    for ticker in benchmarks:
-                        ticker_df = bench_data[bench_data['symbol'] == ticker]
-                        if len(ticker_df) >= 2:
-                            prev_close = float(ticker_df['close'].iloc[-2])
-                            curr_price = float(ticker_df['close'].iloc[-1])
-                            daily_return_pct = ((curr_price - prev_close) / prev_close) * 100
-
-                            idx_status = "⚠️ CRASH" if daily_return_pct <= cfg_index_drop else "🍏 SAFE"
-                            matrix_rows.append({
-                                "Technical Factor": f"Benchmark ({ticker})", 
-                                "Live Value": f"${curr_price:,.2f}", 
-                                "Daily Chg %": f"{daily_return_pct:+.2f}%", 
-                                "Status": idx_status
-                            })
-
-                            # Trigger if any key index drops past the user selected parameter
-                            if daily_return_pct <= cfg_index_drop:
-                                crash_reasons.append(f"{ticker} Crash ({daily_return_pct:.2f}%)")
-                        else:
-                            matrix_rows.append({
-                                "Technical Factor": f"Benchmark ({ticker})", 
-                                "Live Value": "N/A", 
-                                "Daily Chg %": "N/A", 
-                                "Status": "🔄 FETCHING"
-                            })
+                    # Read fast-cached structural values directly to pass execution barriers
+                    cached_risk = st.session_state["global_market_risk_matrix"]
+                    crash_reasons = cached_risk["crash_reasons"]
+                    # ================================================================================
 
                     # Render live structural metric table directly inside the main UI container view 
                     #with st.expander("📊 Live Market Risk Factor Matrix", expanded=False):
@@ -1065,8 +1263,6 @@ def live_ui():
 
                 except Exception as crash_err:
                     st.caption(f"⚠️ Risk Framework temporary bypass: {crash_err}")
-
-
 
                 # --- COOL-DOWN GATE FOR CONSECUTIVE LOSSES (15 MINUTE LOCK) ---
                 is_cooled_down = False
@@ -1142,52 +1338,6 @@ def live_ui():
                 elif is_market_crashing:
                     st.caption(f"🛑 Bot Blocked: Order routing blocked by multi-index crash constraints.")
 
-                # ====================================================================================
-                # 2. HIGH-DENSITY PROGRESSIVE METRIC GRID (SHOWS EXACTLY ONCE PER REFRESH CYCLE)
-                # ====================================================================================
-                if not st.session_state.get("has_shown_risk_matrix", False):
-                    st.markdown("### 📊 Market Risk Factor Metrics")
-
-                    # Create 4 columns for VIXY, SPY, QQQ, and IWM
-                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-
-                    # 1. Volatility Metric Card (VIXY Daily Percent Change vs Max Limit)
-                    with m_col1:
-                        # FIXED: vix_status is now guaranteed to exist
-                        vix_status_icon = "🟢" if "SAFE" in vix_status else "🔴"
-                        st.metric(
-                            label=f"{vix_status_icon} Volatility (VIXY)", 
-                            value=vix_chg_str, # Displays the live daily return string (e.g. +4.25%)
-                            delta=f"Max Limit: +{cfg_vix_max:.1f}%",
-                            delta_color="normal" if "SAFE" in vix_status else "inverse"
-                        )
-
-                    # 2. Extract and parse index daily performances dynamically from your data
-                    for ticker, col_target in zip(["SPY", "QQQ", "IWM"], [m_col2, m_col3, m_col4]):
-                        ticker_df = bench_data[bench_data['symbol'] == ticker]
-                        if len(ticker_df) >= 2:
-                            p_close = float(ticker_df['close'].iloc[-2])
-                            c_price = float(ticker_df['close'].iloc[-1])
-                            ret_pct = ((c_price - p_close) / p_close) * 100
-
-                            idx_icon = "🍏" if ret_pct > cfg_index_drop else "🚨"
-                            with col_target:
-                                st.metric(
-                                    label=f"{idx_icon} {ticker} Benchmark",
-                                    value=f"${c_price:,.2f}",
-                                    delta=f"{ret_pct:+.2f}% (Limit: {cfg_index_drop:+.1f}%)",
-                                    delta_color="normal" if ret_pct > cfg_index_drop else "inverse"
-                                )
-                        else:
-                            with col_target:
-                                st.metric(label=f"🔄 {ticker}", value="Loading...")
-
-                    st.markdown("---")
-                    # Flip the state flag so subsequent tickers in the loop bypass printing this container
-                    st.session_state["has_shown_risk_matrix"] = True
-                # ====================================================================================
-
-
             # --- MANUAL BUY BUTTON ---
             # if s5.button("Buy", key=f"b_{s}"):
                 # Pass the local variables 's', 'price', and 'ai_conf' into the function
@@ -1216,10 +1366,21 @@ def live_ui():
     st.markdown("---")
     st.subheader("📋 Active Pending Orders")
 
-    # Fetch current pending data
+    # Fetch current pending data (Instantly pulls from fast local memory under the hybrid approach)
     pending_df = get_pending_orders_df(trading_client) # Pass your active Alpaca trading client instance
 
     if not pending_df.empty:
+        # ====================================================================================
+        # HYBRID SYSTEM: FAST-MEMORY VISUAL SYNC TIMESTAMPS
+        # ====================================================================================
+        # Reads the exact moment your hybrid background cache layer last hit the REST API
+        if "pending_orders_last_update" in st.session_state:
+            import datetime as status_dt
+            last_sync_ts = status_dt.datetime.fromtimestamp(st.session_state["pending_orders_last_update"])
+            last_sync_str = last_sync_ts.strftime("%I:%M:%S %p")
+            st.caption(f"⚡ *Displaying cached orders matrix (Last verified live with Alpaca at {last_sync_str})*")
+        # ====================================================================================
+
         # Display an interactive, sortable UI table
         st.dataframe(
             pending_df, 
@@ -1228,6 +1389,7 @@ def live_ui():
         )
     else:
         st.info("No active pending orders found.")
+
 
 
 
@@ -1256,6 +1418,12 @@ def live_ui():
             "📅 Execution Date Range (CST)", 
             value=[thirty_days_ago.date(), current_now.date()]
         )
+
+        # 🟢 FIXED: Safety clamp protects your historical parsing block from crashing 
+        # while the user is actively clicking or changing dates on the calendar
+        if not isinstance(date_range, (list, tuple)) or len(date_range) < 2:
+            st.stop() # Silently pauses layout draw until the user selects the second date
+
 
     # --- FIXED TRANSITIONAL DATE PARSING ---
     start_dt, end_dt = None, None
@@ -1287,6 +1455,17 @@ def live_ui():
                     key="btn_export_filtered_history", disabled=admin_disabled
                 )
 
+            # ====================================================================================
+            # HYBRID SYSTEM: FAST-MEMORY VISUAL CACHE MONITOR STATUS OVERLAY
+            # ====================================================================================
+            # Dynamically checks if this specific search configuration key matches the cached memory stamp
+            param_cache_identity = f"history_cache_100_{start_dt}_{end_dt}"
+            if param_cache_identity in st.session_state:
+                st.caption("⚡ *Displaying cached historical ledger data (Loads in 0ms without hitting API network lag)*")
+            else:
+                st.caption("📡 *Displaying direct live REST API history payload data*")
+            # ====================================================================================
+
             # Render the interactive UI table matching your specifications
             st.dataframe(
                 history_df,
@@ -1307,6 +1486,6 @@ def live_ui():
             st.bar_chart(f_df.set_index('Factor'), horizontal=True, height=200)
 
     for percent_complete in range(100):
-        time.sleep(0.6) # 0.6s * 100 = 60 seconds
-        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {60 - int(percent_complete*0.6)}s")
+        time.sleep(0.3) # 0.6s * 100 = 60 seconds
+        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {30 - int(percent_complete*0.3)}s")
 live_ui()
