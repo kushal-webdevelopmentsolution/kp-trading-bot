@@ -1545,7 +1545,7 @@ def live_ui():
 
                 # Secondary Backup Path: If WebSocket has no bar, poll a small REST snapshot as a fail-safe
                 else:
-                    recent_start = datetime.now() - timedelta(minutes=5)
+                    recent_start = datetime.now() - timedelta(minutes=10)
                     try:
                         latest_bars_df = data_client.get_stock_bars(StockBarsRequest(
                             symbol_or_symbols=s, 
