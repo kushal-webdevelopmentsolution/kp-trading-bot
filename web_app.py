@@ -961,7 +961,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-@st.fragment(run_every=30)
+@st.fragment(run_every=10)
 def live_ui():
 
     # Fetch current time localized explicitly to the Central Time Zone
@@ -1920,6 +1920,6 @@ def live_ui():
             st.bar_chart(f_df.set_index('Factor'), horizontal=True, height=200)
 
     for percent_complete in range(100):
-        time.sleep(0.3) # 0.6s * 100 = 60 seconds
-        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {30 - int(percent_complete*0.3)}s")
+        time.sleep(0.1) # 0.6s * 100 = 60 seconds
+        prog_placeholder.progress(percent_complete + 1, text=f"Next update in {10 - int(percent_complete*0.1)}s")
 live_ui()
