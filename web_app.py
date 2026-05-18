@@ -1305,6 +1305,33 @@ def live_ui():
     clock = trading_client.get_clock()
     held_symbols = {p.symbol for p in pos} # Essential for auto-execution check
     if pos:
+
+        # ====================================================================================
+        # TOP DASHBOARD CONTROLS: 24-HOUR STOCK FILTER TOGGLE
+        # ====================================================================================
+        # Creates a checkbox/toggle switch at the top of the positions component view
+        hide_non_24h = st.checkbox("🔍 Only Show 24-Hour Eligible Assets", value=False)
+
+        # Pre-process positions to cache 24h status to avoid duplicate API calls inside the UI render loop
+        filtered_pos = []
+        for p in pos:
+            is_24h_asset = False
+            try:
+                asset_data = trading_client.get_asset(p.symbol)
+                is_24h_asset = getattr(asset_data, 'overnight_tradable', False)
+            except Exception:
+                pass
+
+            # Save the state directly onto the position object for use later in the loop
+            p.is_24h_asset = is_24h_asset
+
+            # Filtering logic: if toggle is active, exclude assets that are not 24h eligible
+            if hide_non_24h and not is_24h_asset:
+                continue
+            filtered_pos.append(p)
+        # ====================================================================================
+
+
         # --- START TABLE COLUMNS HEADER ---
         # Define header row outside or at the start of your positions iteration block
         # FIXED: Expanded layouts matrix from 6 to 7 columns to allocate room for Current Price
@@ -1483,28 +1510,7 @@ def live_ui():
             #c1, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
             c1, c_name, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1.8, 1, 1, 1, 1.2, 1.2, 0.5])
 
-            # ====================================================================================
-            # 24-HOUR / OVERNIGHT SESSION ELIGIBILITY UI FLAG 
-            # ====================================================================================
-            # Use a safe lookup on the cached session state or call trading_client if needed
-            is_24h_asset = False
-            try:
-                # Query asset definition details from Alpaca registry profile to parse attributes
-                asset_data = trading_client.get_asset(p.symbol)
-                # Read the official overnight session capability property 
-                is_24h_asset = getattr(asset_data, 'overnight_tradable', False)
-            except Exception:
-                pass
-
-            # If the stock supports round-the-clock execution, append a badge tracker string
-            day_session_tag = " :blue[**[🌙 24H]**]" if is_24h_asset else ""
-
-            # Render symbol with dynamic status configuration markup strings
-            c1.write(f"{side_icon} **{p.symbol}**{day_session_tag}")
-            # ====================================================================================
-
-
-            #c1.write(f"{side_icon} **{p.symbol}**")
+            c1.write(f"{side_icon} **{p.symbol}**")
 
             # Output the company description name string from cache
             c_name.write(f"{full_asset_name}")
