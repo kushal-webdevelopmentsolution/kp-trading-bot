@@ -1483,7 +1483,28 @@ def live_ui():
             #c1, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1, 1, 1, 1.2, 1.2, 0.5])
             c1, c_name, c_price, c2, c3, c_tot, c_day, c4 = st.columns([1, 1.8, 1, 1, 1, 1.2, 1.2, 0.5])
 
-            c1.write(f"{side_icon} **{p.symbol}**")
+            # ====================================================================================
+            # 24-HOUR / OVERNIGHT SESSION ELIGIBILITY UI FLAG 
+            # ====================================================================================
+            # Use a safe lookup on the cached session state or call trading_client if needed
+            is_24h_asset = False
+            try:
+                # Query asset definition details from Alpaca registry profile to parse attributes
+                asset_data = trading_client.get_asset(p.symbol)
+                # Read the official overnight session capability property 
+                is_24h_asset = getattr(asset_data, 'overnight_tradable', False)
+            except Exception:
+                pass
+
+            # If the stock supports round-the-clock execution, append a badge tracker string
+            day_session_tag = " :blue[**[🌙 24H]**]" if is_24h_asset else ""
+
+            # Render symbol with dynamic status configuration markup strings
+            c1.write(f"{side_icon} **{p.symbol}**{day_session_tag}")
+            # ====================================================================================
+
+
+            #c1.write(f"{side_icon} **{p.symbol}**")
 
             # Output the company description name string from cache
             c_name.write(f"{full_asset_name}")
