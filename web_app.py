@@ -1307,30 +1307,28 @@ def live_ui():
     if pos:
 
         # ====================================================================================
-        # TOP DASHBOARD CONTROLS: 24-HOUR STOCK FILTER TOGGLE
+        # TOP DASHBOARD CONTROLS: SAFE ISOLATED 24-HOUR FILTER REGISTRY
         # ====================================================================================
-        # Creates a checkbox/toggle switch at the top of the positions component view
         hide_non_24h = st.checkbox("🔍 Only Show 24-Hour Eligible Assets", value=False)
 
-        # Pre-process positions to cache 24h status to avoid duplicate API calls inside the UI render loop
         is_24h_cache = {}
         filtered_pos = []
+
         for p in pos:
+            ticker_symbol = str(p.symbol)
             is_24h_asset = False
             try:
-                asset_data = trading_client.get_asset(p.symbol)
+                asset_data = trading_client.get_asset(ticker_symbol)
                 is_24h_asset = getattr(asset_data, 'overnight_tradable', False)
             except Exception:
                 pass
 
-            # Save the state directly onto the position object for use later in the loop
-            p.is_24h_asset = is_24h_asset
+            # ✅ FIXED: Save strictly to the local dictionary cache
+            is_24h_cache[ticker_symbol] = is_24h_asset
 
-            # Filtering logic: if toggle is active, exclude assets that are not 24h eligible
             if hide_non_24h and not is_24h_asset:
                 continue
             filtered_pos.append(p)
-        # ====================================================================================
 
 
         # --- START TABLE COLUMNS HEADER ---
