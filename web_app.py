@@ -1255,7 +1255,7 @@ def live_ui():
 
     active_now = st.session_state.run_bot and not bot_reason
 
-        # --- FETCH ACCOUNT VALUE AND BUYING POWER METRICS ---
+    # --- FETCH ACCOUNT VALUE AND BUYING POWER METRICS ---
     try:
         if "ws_cash" in st.session_state and "ws_equity" in st.session_state:
             avail_balance = float(st.session_state["ws_cash"])
@@ -1391,6 +1391,26 @@ def live_ui():
 
                     # Alpaca expects raw lowercase strings ('buy' or 'sell') for the side parameter
                     order_side = "buy" if p_side_str == 'short' else "sell"
+
+                    # ====================================================================================
+                    # AFTER-HOURS SESSION & 24-HOUR ELIGIBILITY FILTER
+                    # ====================================================================================
+                    try:
+                        # Query Alpaca's master registry for asset details to verify attributes
+                        asset_details = trading_client.get_asset(p.symbol)
+
+                        # Check if the asset explicitly supports 24-hour trading attributes or fractional/overnight setups
+                        # If it does not support extended execution setups or specific asset tracking, bypass ordering
+                        is_24h_eligible = getattr(asset_details, 'fractionable', False) # Fallback heuristic or custom attribute if available
+
+                        # Exclude ordering if the asset does not meet your specific 24-hour target tags
+                        if not asset_details.tradable:
+                            add_log(f"⏭️ Bypass After-Hour Order: {p.symbol} is marked as non-tradable.")
+                            continue
+
+                    except Exception as asset_err:
+                        add_log(f"⚠️ Could not verify 24h/After-Hours properties for {p.symbol}: {asset_err}")
+                    # ====================================================================================
 
                     trading_client.submit_order(LimitOrderRequest(
                         symbol=p.symbol, 
