@@ -1313,6 +1313,7 @@ def live_ui():
         hide_non_24h = st.checkbox("🔍 Only Show 24-Hour Eligible Assets", value=False)
 
         # Pre-process positions to cache 24h status to avoid duplicate API calls inside the UI render loop
+        is_24h_cache = {}
         filtered_pos = []
         for p in pos:
             is_24h_asset = False
