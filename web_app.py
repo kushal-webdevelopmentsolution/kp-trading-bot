@@ -1347,7 +1347,7 @@ def live_ui():
         st.divider() # Creates a clean separation line under the headers
         # --- END TABLE COLUMNS HEADER ---
         # Loop through positions to handle UI and Virtual Monitoring
-        for p in pos:
+        for p in filtered_pos:
             # --- START VIRTUAL MONITORING LOGIC ---
             # If market is CLOSED, we manually monitor the trailing stop-loss
             if not clock.is_open:
