@@ -1298,6 +1298,7 @@ def live_ui():
     pos = trading_client.get_all_positions()
     clock = trading_client.get_clock()
     held_symbols = {p.symbol for p in pos} # Essential for auto-execution check
+    filtered_pos = []
     if pos:
 
         # ====================================================================================
@@ -1309,7 +1310,7 @@ def live_ui():
         if "is_24h_cache" not in st.session_state:
             st.session_state.is_24h_cache = {}
 
-        filtered_pos = []
+
 
         for p in pos:
             ticker_symbol = str(p.symbol)
@@ -1544,7 +1545,7 @@ def live_ui():
 
     # AI Signal Feed
     st.subheader("⚡ AI Signals")
-    for s in st.session_state.tickers:
+    for s in filtered_pos: #st.session_state.tickers:
         try:
             # ====================================================================================
             # HYBRID DATA PIPELINE: WEBSOCKET DRIVEN WITH AUTOMATIC REST API FALLBACK
