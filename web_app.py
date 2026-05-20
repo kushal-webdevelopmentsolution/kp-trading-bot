@@ -714,7 +714,7 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 qty=qty,
                 limit_price=price,
                 side=side.value,
-                time_in_force=TimeInForce.GTC,  # Mandatory for extended hours
+                time_in_force=TimeInForce.Day,  # Mandatory for extended hours
                 extended_hours=True            # Bypasses regular hours validation
             ))
 
@@ -754,7 +754,7 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 qty=qty,
                 limit_price=target_take_profit_price,
                 side=exit_side.value,
-                time_in_force=TimeInForce.GTC,
+                time_in_force=TimeInForce.Day,
                 extended_hours=True
             ))
 
@@ -764,7 +764,7 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 qty=qty,
                 limit_price=target_stop_loss_price,
                 side=exit_side.value,
-                time_in_force=TimeInForce.GTC,
+                time_in_force=TimeInForce.Day,
                 extended_hours=True
             ))
 
@@ -1560,7 +1560,7 @@ def live_ui():
 
             # 1. INITIALIZATION BASELINE: Fetch 30 days of history exactly once via REST API
             if state_key not in st.session_state:
-                start_time = datetime.now() - timedelta(days=30)
+                start_time = datetime.now() - timedelta(days=730)
                 try:
                     init_df = data_client.get_stock_bars(StockBarsRequest(
                         symbol_or_symbols=s, 
