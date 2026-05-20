@@ -1311,21 +1311,40 @@ def live_ui():
         # ====================================================================================
         hide_non_24h = st.checkbox("🔍 Only Show 24-Hour Eligible Assets", value=False)
 
-        is_24h_cache = {}
+        # Simple local cache lookup to prevent hitting Alpaca API rate limits every refresh
+        if "is_24h_cache" not in st.session_state:
+            st.session_state.is_24h_cache = {}
+
         filtered_pos = []
 
         for p in pos:
             ticker_symbol = str(p.symbol)
-            is_24h_asset = False
-            try:
-                asset_data = trading_client.get_asset(ticker_symbol)
-                is_24h_asset = getattr(asset_data, 'overnight_tradable', False)
-            except Exception:
-                pass
 
-            # ✅ FIXED: Save strictly to the local dictionary cache
-            is_24h_cache[ticker_symbol] = is_24h_asset
+            # Check session state cache first
+            if ticker_symbol in st.session_state.is_24h_cache:
+                is_24h_asset = st.session_state.is_24h_cache[ticker_symbol]
+            else:
+                is_24h_asset = False
+                try:
+                    asset_data = trading_client.get_asset(ticker_symbol)
 
+                    # ✅ FIX: Alpaca stores features inside an attributes list. 
+                    # We check if 'overnight_tradable' is present as a string or Enum property.
+                    if hasattr(asset_data, 'attributes') and asset_data.attributes is not None:
+                        # Convert attributes to strings to safely catch Enum variants or raw strings
+                        attrs_str_list = [str(a).lower() for a in asset_data.attributes]
+                        if any("overnight_tradable" in attr for attr in attrs_str_list):
+                            is_24h_asset = True
+
+                    # Fallback check for alternative SDK object structures
+                    elif getattr(asset_data, 'overnight_tradable', False) == True:
+                        is_24h_asset = True
+
+                except Exception:
+                    pass
+                st.session_state.is_24h_cache[ticker_symbol] = is_24h_asset
+
+            # If box is checked and asset is NOT 24h, skip it entirely
             if hide_non_24h and not is_24h_asset:
                 continue
             filtered_pos.append(p)
