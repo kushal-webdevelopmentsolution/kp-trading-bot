@@ -714,7 +714,7 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 qty=qty,
                 limit_price=price,
                 side=side.value,
-                time_in_force=TimeInForce.DAY,  # Mandatory for extended hours
+                time_in_force=TimeInForce.GTC,  # Mandatory for extended hours
                 extended_hours=True            # Bypasses regular hours validation
             ))
 
@@ -754,7 +754,7 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 qty=qty,
                 limit_price=target_take_profit_price,
                 side=exit_side.value,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
                 extended_hours=True
             ))
 
@@ -764,7 +764,7 @@ def execute_trade(s, price, ai_conf, side=OrderSide.BUY, is_bot=False):
                 qty=qty,
                 limit_price=target_stop_loss_price,
                 side=exit_side.value,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=TimeInForce.GTC,
                 extended_hours=True
             ))
 
