@@ -1560,7 +1560,7 @@ def live_ui():
 
             # 1. INITIALIZATION BASELINE: Fetch 30 days of history exactly once via REST API
             if state_key not in st.session_state:
-                start_time = datetime.now() - timedelta(days=730)
+                start_time = datetime.now() - timedelta(days=30)
                 try:
                     init_df = data_client.get_stock_bars(StockBarsRequest(
                         symbol_or_symbols=s, 
@@ -1590,7 +1590,7 @@ def live_ui():
 
                 # Secondary Backup Path: If WebSocket has no bar, poll a small REST snapshot as a fail-safe
                 else:
-                    recent_start = datetime.now() - timedelta(minutes=10)
+                    recent_start = datetime.now() - timedelta(minutes=15)
                     try:
                         latest_bars_df = data_client.get_stock_bars(StockBarsRequest(
                             symbol_or_symbols=s, 
