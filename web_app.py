@@ -1545,7 +1545,7 @@ def live_ui():
 
     # AI Signal Feed
     st.subheader("⚡ AI Signals")
-    for s in filtered_pos: #st.session_state.tickers:
+    for s in st.session_state.tickers:
         try:
             # ====================================================================================
             # HYBRID DATA PIPELINE: WEBSOCKET DRIVEN WITH AUTOMATIC REST API FALLBACK
